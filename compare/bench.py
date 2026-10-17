@@ -33,9 +33,10 @@ def main():
         print(f"generating {args.mib} MiB dataset ...", flush=True)
         os.makedirs(base, exist_ok=True)
         _, nfiles = gen.gen_rootfs(data, args.mib)
-        gen.make_tar(data, os.path.join(base, "rootfs.tar"), "gnu")
-        gen.make_tar(data, os.path.join(base, "rootfs.tar.gz"), "gnu", compress="gz")
         open(stamp, "w").write(str(nfiles))
+    for name, c in (("rootfs.tar", None), ("rootfs.tar.gz", "gz")):
+        if not os.path.exists(os.path.join(base, name)):
+            gen.make_tar(data, os.path.join(base, name), "gnu", compress=c)
     nfiles = open(stamp).read()
     blocks_empty = str((args.mib << 20) // 4096)
     cases = [
@@ -65,10 +66,11 @@ def main():
                     break
                 if best is None or r["seconds"] < best["seconds"]:
                     best = r
-            row["tools"][tool] = {"seconds": best["seconds"], "rss": best["rss"], "rc": best["rc"],
+            row["tools"][tool] = {"seconds": best["seconds"], "rss": best["rss"], "footprint": best["footprint"],
+                                  "rc": best["rc"],
                                   "img": img if best["rc"] == 0 else None, "stderr": best["stderr"][-300:]}
-            print(f"  {name:28} {tool:12} {best['seconds']:8.2f}s  rss={(best['rss'] or 0) / 2**20:7.1f} MiB  rc={best['rc']}",
-                  flush=True)
+            mem = best["footprint"] or best["rss"] or 0
+            print(f"  {name:28} {tool:12} {best['seconds']:8.2f}s  mem={mem / 2**20:7.1f} MiB  rc={best['rc']}", flush=True)
         imgs = [t["img"] for t in row["tools"].values() if t["img"]]
         reps = inspect_images(imgs)
         ref = row["tools"].get("xgenext2fs")
@@ -104,9 +106,16 @@ def main():
         valid = "/".join("y" if ts[t].get("valid") else "n" for t in tools if t in ts)
         same = "/".join({True: "y", False: "n", None: "-"}[ts[t].get("same")] for t in tools if t in ts)
         lines.append(f"| {row['case']} | " + " | ".join(cells) + " | " + " | ".join(sp) + f" | {valid} | {same} |")
-    lines += ["", "Peak RSS (MiB): " + "; ".join(
-        f"{row['case']}: " + ", ".join(f"{t}={(v['rss'] or 0) / 2**20:.0f}" for t, v in row["tools"].items())
-        for row in results)]
+    metric = "peak memory footprint" if sys.platform == "darwin" else "peak resident set size"
+    lines += ["", f"Memory ({metric}, MiB; see compare/MEMORY.md):", "",
+              "| case | " + " | ".join(tools) + " |", "|---|" + "---:|" * len(tools)]
+    for row in results:
+        cells = []
+        for t in tools:
+            v = row["tools"].get(t)
+            mem = v and (v["footprint"] or v["rss"])
+            cells.append("—" if not mem or v["rc"] else f"{mem / 2**20:,.0f}")
+        lines.append(f"| {row['case']} | " + " | ".join(cells) + " |")
     text = "\n".join(lines)
     print("\n" + text)
     if args.out:

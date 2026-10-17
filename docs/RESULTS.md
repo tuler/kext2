@@ -47,8 +47,20 @@ Dataset: 1024 MiB, 9610 files (compare/gen.py gen_rootfs). Best of 3 runs.
 | tar.gz (4 KiB blocks) | 2.52 s | 1.10 s | 0.85 s | 3.0× | 1.3× | y/y/y | y/y/y |
 | empty 1024 MiB image | 0.01 s | 0.01 s | 0.01 s | 0.9× | 0.8× | y/y/y | y/n/y |
 
-Peak RSS (MiB): directory (4 KiB blocks): xgenext2fs=3, mkext2=926, kext2=48; directory (1 KiB blocks): xgenext2fs=3, mkext2=906, kext2=48; tar (4 KiB blocks): xgenext2fs=4, mkext2=624, kext2=47; tar.gz (4 KiB blocks): xgenext2fs=4, mkext2=588, kext2=54; empty 1024 MiB image: xgenext2fs=2, mkext2=4, kext2=3
+## Memory
 
-kext2 streams file data instead of buffering the tree. Its peak memory is about
-50 MiB, against 600–930 MiB for mkext2; xgenext2fs needs 2–4 MiB but is 3–185×
-slower.
+Peak memory footprint on macOS, in MiB, from `compare/memory.py`. The Linux
+numbers and the analysis are in [`compare/MEMORY.md`](../compare/MEMORY.md).
+
+| case | xgenext2fs | mkext2 | kext2 |
+|---|---:|---:|---:|
+| 1 GiB tree, 4 KiB blocks | 2.7 | 924 | 47 |
+| 1 GiB tar, 4 KiB blocks | 3.4 | 616 | 46 |
+| 100,000 files of 1 KiB | 2.2 | 484 | 84 |
+| empty 16 GiB image | 1.8 | 4.3 | 1.8 |
+
+Each tool's memory grows with something different:
+- **xgenext2fs** grows with nothing, and pays for it in time (3–185× slower).
+- **kext2** grows with the number of files (about 0.5 KiB each), plus about
+  30 MiB of write buffers.
+- **mkext2** grows with the image's allocated size.
