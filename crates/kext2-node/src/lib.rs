@@ -33,26 +33,11 @@ pub struct LayerSpec {
 #[napi(object)]
 #[derive(Default)]
 pub struct BuildOptions {
-    /// 1024 (default), 2048 or 4096 (`-B`).
-    pub block_size: Option<u32>,
-    /// Exact image size in blocks (`-b`); computed from the inputs when absent.
-    pub size_in_blocks: Option<i64>,
-    /// `-r`: `"+N"` adds N free blocks to the computed size, `"N"` means exactly N blocks.
-    pub readjustment: Option<String>,
-    /// Bytes per inode (`-i`); only effective with `sizeInBlocks`.
-    pub bytes_per_inode: Option<i64>,
-    /// Minimum number of inodes (`-N`).
-    pub number_of_inodes: Option<i64>,
+    /// Free space to leave in the image, in bytes (`--free-space`), with one
+    /// free inode per 16 KiB of it.
+    pub free_space: Option<i64>,
     /// Volume label (`-L`, up to 16 bytes).
     pub volume_label: Option<String>,
-    /// Percentage of reserved blocks (`-m`, default 5).
-    pub reserved_percentage: Option<u32>,
-    /// Creator OS (`-o`): `"linux"`, `"hurd"`, `"freebsd"`, `"lites"` or a number.
-    pub creator_os: Option<String>,
-    /// Fill unallocated blocks with this byte (`-e`).
-    pub fill_value: Option<u32>,
-    /// Store all-zero blocks as holes (`-z`).
-    pub allow_holes: Option<bool>,
     /// Every timestamp is 0 (`-f`).
     pub faketime: Option<bool>,
     /// Every timestamp (filesystem and files) is this value.
@@ -66,10 +51,6 @@ pub struct BuildOptions {
     pub squash_uids: Option<u32>,
     /// Remove group and other permissions (`-P`).
     pub squash_perms: Option<bool>,
-    /// Existing image to add to (`-x`).
-    pub starting_image: Option<String>,
-    /// Image paths to write `.blk` block maps for (`-g`), in the current directory.
-    pub block_maps: Option<Vec<String>>,
     /// Content layers, applied in order.
     pub layers: Option<Vec<LayerSpec>>,
     /// Writer threads (default: automatic). The image does not depend on it.
@@ -89,10 +70,10 @@ pub struct Message {
 /// Summary of a built image.
 #[napi(object)]
 pub struct BuildResult {
+    /// Always 4096.
     pub block_size: u32,
     pub blocks: i64,
     pub free_blocks: i64,
-    pub reserved_blocks: i64,
     pub inodes: i64,
     pub free_inodes: i64,
     pub groups: i64,
@@ -138,32 +119,11 @@ fn job(o: BuildOptions, output: &Path) -> Result<Job> {
         args.push(flag.into());
         args.push(value.into());
     };
-    if let Some(v) = o.block_size {
-        opt("--block-size", v.to_string());
-    }
-    if let Some(v) = o.size_in_blocks {
-        opt("--size-in-blocks", v.to_string());
-    }
-    if let Some(v) = o.readjustment {
-        opt("--readjustment", v);
-    }
-    if let Some(v) = o.bytes_per_inode {
-        opt("--bytes-per-inode", v.to_string());
-    }
-    if let Some(v) = o.number_of_inodes {
-        opt("--number-of-inodes", v.to_string());
+    if let Some(v) = o.free_space {
+        opt("--free-space", v.to_string());
     }
     if let Some(v) = o.volume_label {
         opt("--volume-label", v);
-    }
-    if let Some(v) = o.reserved_percentage {
-        opt("--reserved-percentage", v.to_string());
-    }
-    if let Some(v) = o.creator_os {
-        opt("--creator-os", v);
-    }
-    if let Some(v) = o.fill_value {
-        opt("--fill-value", v.to_string());
     }
     if let Some(v) = o.timestamp {
         opt("--timestamp", v.to_string());
@@ -174,18 +134,7 @@ fn job(o: BuildOptions, output: &Path) -> Result<Job> {
     if let Some(v) = o.squash_uids {
         opt("--squash-uids", v.to_string());
     }
-    if let Some(v) = o.starting_image {
-        opt("--starting-image", v);
-    }
-    for p in o.block_maps.unwrap_or_default() {
-        opt("--block-map", p);
-    }
-    for (flag, on) in [
-        ("--allow-holes", o.allow_holes),
-        ("--faketime", o.faketime),
-        ("--squash-perms", o.squash_perms),
-        ("--verbose", o.verbose),
-    ] {
+    for (flag, on) in [("--faketime", o.faketime), ("--squash-perms", o.squash_perms), ("--verbose", o.verbose)] {
         if on == Some(true) {
             args.push(flag.into());
         }
@@ -250,7 +199,6 @@ fn run(job: &Job) -> std::result::Result<BuildResult, String> {
             block_size: s.block_size,
             blocks: s.blocks as i64,
             free_blocks: s.free_blocks as i64,
-            reserved_blocks: s.reserved_blocks as i64,
             inodes: s.inodes as i64,
             free_inodes: s.free_inodes as i64,
             groups: s.groups as i64,
@@ -377,7 +325,6 @@ impl Task for RunTask {
                     block_size: s.block_size,
                     blocks: s.blocks as i64,
                     free_blocks: s.free_blocks as i64,
-                    reserved_blocks: s.reserved_blocks as i64,
                     inodes: s.inodes as i64,
                     free_inodes: s.free_inodes as i64,
                     groups: s.groups as i64,
@@ -394,8 +341,8 @@ impl Task for RunTask {
 }
 
 /// Run with command line arguments (without the program name), as the
-/// `kext2` tool takes them (the same as xgenext2fs'), e.g.
-/// `["--block-size", "4096", "--faketime", "--root", "dir", "out.ext2"]`.
+/// `kext2` tool takes them, e.g.
+/// `["--faketime", "--free-space", "64M", "--root", "dir", "out.ext2"]`.
 /// Rejects with the error message when the tool would exit with an error.
 #[napi(js_name = "kext2", ts_return_type = "Promise<RunResult>")]
 pub fn kext2_cli(args: Vec<String>) -> AsyncTask<RunTask> {

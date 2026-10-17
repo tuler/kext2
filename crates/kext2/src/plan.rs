@@ -3,32 +3,32 @@
 
 use crate::dirent;
 use crate::error::{show, Error, Result};
-use crate::geometry::{self, DataMap, Geo, Geometry};
+use crate::geometry::{self, DataMap, Geo, Geometry, BS};
 use crate::layout::{self, Seg, Tiers};
-use crate::runs::Runs;
 use crate::tree::{Kind, NodeId, Tree, NONE, ROOT};
 
 pub const LINK_MAX: u64 = 32000;
 pub const MAX_ID: u32 = 4_294_967_294;
+/// Data blocks of the generated lost+found (16 KiB, as mke2fs makes it).
+pub const LOST_FOUND_BLOCKS: u64 = 4;
+/// `--free-space` bytes per extra free inode.
+pub const BYTES_PER_FREE_INODE: u64 = 16384;
 
-/// Sizing parameters taken from the options (or the starting image).
-#[derive(Debug, Clone)]
+/// Sizing parameters taken from the options.
+#[derive(Debug, Clone, Default)]
 pub struct Params {
-    pub bs: u32,
-    /// `-b` (or the starting image's block count).
-    pub blocks: Option<u64>,
-    /// `-r`.
-    pub readjust: u64,
-    /// `-i` (only used with `blocks`).
-    pub bytes_per_inode: Option<u64>,
-    /// `-N` (or the starting image's inode count).
-    pub min_inodes: u64,
-    /// `-m`.
-    pub reserved_pct: u32,
-    /// Reserved count fixed by a starting image (`-x`).
-    pub fixed_reserved: Option<u64>,
-    /// Hurd: no `filetype`.
-    pub filetype: bool,
+    /// Free blocks to leave in the image.
+    pub free_blocks: u64,
+    /// Free inodes to leave in the image (at least; the geometry rounds up).
+    pub free_inodes: u64,
+}
+
+impl Params {
+    /// The sizing for `--free-space bytes`: whole free blocks, and one free
+    /// inode per [`BYTES_PER_FREE_INODE`] bytes.
+    pub fn from_free_space(bytes: u64) -> Params {
+        Params { free_blocks: bytes.div_ceil(BS as u64), free_inodes: bytes.div_ceil(BYTES_PER_FREE_INODE) }
+    }
 }
 
 /// One run of an inode's layout sequence placed at data indices
@@ -89,9 +89,7 @@ pub struct Plan {
     pub geo: Geometry,
     pub map: DataMap,
     pub tiers: Tiers,
-    pub filetype: bool,
     pub large_file: bool,
-    pub reserved: u64,
     /// Per node: inode number (0 = not in the image).
     pub ino: Vec<u32>,
     /// Per node: link count.
@@ -154,58 +152,40 @@ fn path_of(tree: &Tree, parents: &[NodeId], id: NodeId) -> String {
     format!("/{}", comps.join("/"))
 }
 
-fn dir_pack(tree: &Tree, d: NodeId, bs: u32) -> Vec<u32> {
+fn dir_pack(tree: &Tree, d: NodeId) -> Vec<u32> {
     let ch = tree.children(d);
-    dirent::pack([1usize, 2].into_iter().chain(ch.iter().map(|(n, _)| n.len())), bs as usize)
+    dirent::pack([1usize, 2].into_iter().chain(ch.iter().map(|(n, _)| n.len())))
 }
 
-/// Blocks of a regular file's allocated set.
-fn file_set(size: u64, bs: u32, zmap: Option<&Runs>) -> Runs {
-    match zmap {
-        Some(z) => z.clone(),
-        None => Runs::dense(size.div_ceil(bs as u64)),
-    }
-}
-
-fn node_nb(tree: &Tree, id: NodeId, dirs: &[Option<Box<DirPlan>>], t: &Tiers, bs: u32) -> u64 {
+/// Data blocks of node `id` (indirect blocks not included).
+fn data_blocks(tree: &Tree, id: NodeId, dirs: &[Option<Box<DirPlan>>]) -> u64 {
     match &tree.node(id).kind {
-        Kind::Reg(r) => match &r.zmap {
-            Some(z) => layout::nb(z, t),
-            None => {
-                let n = r.size.div_ceil(bs as u64);
-                n + layout::dense_indirect(n, t)
-            }
-        },
-        Kind::Dir(_) => {
-            let n = dirs[id as usize].as_ref().map(|d| d.nblocks).unwrap_or(1);
-            n + layout::dense_indirect(n, t)
-        }
-        Kind::Symlink(s) => {
-            if s.len() <= 59 {
-                0
-            } else {
-                1
-            }
-        }
+        Kind::Reg(r) => r.size.div_ceil(BS as u64),
+        Kind::Dir(_) => dirs[id as usize].as_ref().map(|d| d.nblocks).unwrap_or(1),
+        Kind::Symlink(s) => (s.len() > 59) as u64,
         _ => 0,
     }
 }
 
+fn node_nb(tree: &Tree, id: NodeId, dirs: &[Option<Box<DirPlan>>], t: &Tiers) -> u64 {
+    let n = data_blocks(tree, id, dirs);
+    n + layout::dense_indirect(n, t)
+}
+
 /// Run the plan phase.
 pub fn plan(tree: &mut Tree, p: &Params) -> Result<Plan> {
-    let bs = p.bs;
-    let tiers = Tiers::new(bs);
+    let bs = BS;
+    let tiers = Tiers::new();
     tree.sort_dirs();
     let n = tree.nodes.len();
 
-    // --- lost+found
-    let lf = tree
+    // --- the generated lost+found (R-RES-1), if no input replaced it
+    let lost_found = tree
         .children(ROOT)
         .iter()
         .find(|(name, _)| &**name == b"lost+found")
         .map(|(_, id)| *id)
         .filter(|&id| tree.node(id).generated);
-    let pristine = lf.map(|id| tree.children(id).is_empty() && !tree.node(id).fixed_up).unwrap_or(false);
 
     // --- traversal: reachability, parents, link counts, limits
     let mut parents = vec![NONE; n];
@@ -216,7 +196,7 @@ pub fn plan(tree: &mut Tree, p: &Params) -> Result<Plan> {
     parents[ROOT as usize] = ROOT;
     let mut stack = vec![ROOT];
     let mut large_file = false;
-    let max_size = layout::max_file_size(bs);
+    let max_size = layout::MAX_FILE_SIZE;
     while let Some(d) = stack.pop() {
         dir_order.push(d);
         let mut subdirs = 0u64;
@@ -297,119 +277,43 @@ pub fn plan(tree: &mut Tree, p: &Params) -> Result<Plan> {
         }
     }
 
-    // --- directory packing
+    // --- directory packing; lost+found gets at least LOST_FOUND_BLOCKS
     let mut dirs: Vec<Option<Box<DirPlan>>> = (0..n).map(|_| None).collect();
     for &d in &dir_order {
-        let starts = dir_pack(tree, d, bs);
-        let nblocks = starts.len() as u64;
+        let starts = dir_pack(tree, d);
+        let mut nblocks = starts.len() as u64;
+        if Some(d) == lost_found {
+            nblocks = nblocks.max(LOST_FOUND_BLOCKS);
+        }
+        if nblocks * bs as u64 > (1u64 << 32) - bs as u64 {
+            return Err(Error::fatal(format!("directory {} too large", path_of(tree, &parents, d))));
+        }
         dirs[d as usize] = Some(Box::new(DirPlan { starts, nblocks, parent: parents[d as usize] }));
     }
 
-    // --- nb per node
+    // --- blocks per node, inode count and size (R-SIZE-1..4)
     let mut nb = vec![0u64; n];
+    let mut dsum = 0u64;
+    let mut u = 0u64;
     for id in 0..n {
         if reach[id] {
-            nb[id] = node_nb(tree, id as NodeId, &dirs, &tiers, bs);
+            nb[id] = node_nb(tree, id as NodeId, &dirs, &tiers);
+            dsum += nb[id];
+            u += (id as NodeId != ROOT) as u64;
         }
     }
-    let sum = |skip_lf: bool, nb: &[u64], reach: &[bool]| -> (u64, u64) {
-        let mut d = 0u64;
-        let mut u = 0u64;
-        for id in 0..n {
-            if !reach[id] || (skip_lf && Some(id as NodeId) == lf) {
-                continue;
-            }
-            d += nb[id];
-            if id as NodeId != ROOT {
-                u += 1;
-            }
-        }
-        (d, u)
-    };
-
-    // --- reserved blocks and lost+found (R-RES-2, R-RES-3)
-    let reserved = match p.fixed_reserved {
-        Some(r) => r,
-        None => {
-            let (mut d0, u0) = sum(pristine, &nb, &reach);
-            if pristine {
-                // root packed without the lost+found entry
-                let ch = tree.children(ROOT);
-                let lens = [1usize, 2]
-                    .into_iter()
-                    .chain(ch.iter().filter(|(nm, _)| &**nm != b"lost+found").map(|(nm, _)| nm.len()));
-                let root_blocks = dirent::pack(lens, bs as usize).len() as u64;
-                d0 = d0 - nb[ROOT as usize] + root_blocks + layout::dense_indirect(root_blocks, &tiers);
-            }
-            let n0 = geometry::size(bs, d0, 0, (10 + u0).max(p.min_inodes))?;
-            n0 * p.reserved_pct as u64 / 100
-        }
-    };
-    let mut lost_found = None;
-    if let Some(l) = lf {
-        if reserved > 0 {
-            let dp = dirs[l as usize].as_mut().unwrap();
-            dp.nblocks = dp.nblocks.max(16);
-            nb[l as usize] = node_nb(tree, l, &dirs, &tiers, bs);
-            lost_found = Some(l);
-        } else if pristine {
-            tree.unlink_child(ROOT, b"lost+found");
-            reach[l as usize] = false;
-            nb[l as usize] = 0;
-            nlink[ROOT as usize] -= 1;
-            let starts = dir_pack(tree, ROOT, bs);
-            let dp = dirs[ROOT as usize].as_mut().unwrap();
-            dp.nblocks = starts.len() as u64;
-            dp.starts = starts;
-            nb[ROOT as usize] = node_nb(tree, ROOT, &dirs, &tiers, bs);
-            dirs[l as usize] = None;
-        } else {
-            lost_found = Some(l);
-        }
-    }
-    for &d in &dir_order {
-        if let Some(dp) = &dirs[d as usize] {
-            if dp.nblocks * bs as u64 > (1u64 << 32) - bs as u64 {
-                return Err(Error::fatal(format!("directory {} too large", path_of(tree, &parents, d))));
-            }
-        }
-    }
-
-    // --- inode count and size (R-SIZE-1..5)
-    let (dsum, u) = sum(false, &nb, &reach);
-    let need = 10 + u;
-    let mut inodes = need.max(p.min_inodes);
-    if let (Some(b), Some(i)) = (p.blocks, p.bytes_per_inode) {
-        let t = (b as u128 * bs as u128 / i as u128).min(u64::MAX as u128) as u64;
-        inodes = inodes.max(t);
-    }
+    let inodes = 10 + u + p.free_inodes;
     if inodes > u32::MAX as u64 {
         return Err(Error::fatal(format!("too many inodes ({inodes})")));
     }
-    let blocks = match p.blocks {
-        None => geometry::size(bs, dsum, reserved + p.readjust, inodes)?,
-        Some(b) => {
-            let ok = matches!(geometry::geometry(bs, b, inodes), Geo::Valid(ref g) if g.capacity >= dsum);
-            if !ok {
-                return Err(match geometry::size(bs, dsum, 0, inodes) {
-                    Ok(m) if m > b => Error::fatal(format!("image too small: {b} blocks requested, at least {m} needed")),
-                    Ok(_) => Error::fatal(format!(
-                        "image too small: {b} blocks requested; the geometry cannot hold {inodes} inodes (too many inodes)"
-                    )),
-                    Err(_) => Error::fatal(format!("image too small: {b} blocks requested (too many inodes)")),
-                });
-            }
-            b
-        }
-    };
-    let geo = match geometry::geometry(bs, blocks, inodes) {
+    let blocks = geometry::size(dsum, p.free_blocks, inodes)?;
+    let geo = match geometry::geometry(blocks, inodes) {
         Geo::Valid(g) => g,
         Geo::Invalid { .. } => return Err(Error::fatal("no valid geometry (too many inodes)")),
     };
     if geo.inodes_count() > u32::MAX as u64 {
         return Err(Error::fatal("too many inodes"));
     }
-    let reserved_final = reserved.min(blocks / 2);
 
     // --- allocation (R-ALLOC)
     let map = DataMap::new(&geo);
@@ -418,7 +322,6 @@ pub fn plan(tree: &mut Tree, p: &Params) -> Result<Plan> {
         geo: &geo,
         map: &map,
         tiers,
-        bs,
         c: 0,
         rem: dsum,
         next: vec![0u32; geo.groups as usize],
@@ -484,9 +387,7 @@ pub fn plan(tree: &mut Tree, p: &Params) -> Result<Plan> {
         geo,
         map,
         tiers,
-        filetype: p.filetype,
         large_file,
-        reserved: reserved_final,
         ino,
         nlink,
         nb,
@@ -510,7 +411,6 @@ struct Alloc<'a> {
     geo: &'a Geometry,
     map: &'a DataMap,
     tiers: Tiers,
-    bs: u32,
     c: u64,
     rem: u64,
     next: Vec<u32>,
@@ -560,17 +460,12 @@ impl Alloc<'_> {
             return;
         }
         let base = self.c;
-        let node = self.tree.node(x);
-        let set = match &node.kind {
-            Kind::Reg(r) => file_set(r.size, self.bs, r.zmap.as_deref()),
-            Kind::Dir(_) => Runs::dense(self.dirs[x as usize].as_ref().unwrap().nblocks),
-            _ => Runs::dense(1), // slow symlink
-        };
+        let n = data_blocks(self.tree, x, self.dirs);
         let mut pos = base;
         let t = self.tiers;
         self.first_extent[x as usize] = self.extents.len() as u32;
         let mut ext = std::mem::take(&mut self.extents);
-        layout::walk(&set, &t, |s| match s {
+        layout::walk(n, &t, |s| match s {
             Seg::Data { lstart, n } => {
                 debug_assert!(lstart + n <= u32::MAX as u64);
                 ext.push(Extent { start: pos, lstart: lstart as u32, node: x, len: n as u32, level: 0 });

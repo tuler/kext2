@@ -29,6 +29,11 @@ TOOLS = {
 
 # Options only the newer tools understand.
 EXTENSIONS = ("--timestamp", "--clamp-timestamps")
+# Options only kext2 understands.
+KEXT2_ONLY = ("--free-space",)
+# xgenext2fs options kext2 does not have: it always uses 4 KiB blocks, sizes
+# the image from the content plus --free-space, and reserves no blocks.
+KEXT2_DROPPED = ("-b", "-r", "-N", "-i", "-m", "-o", "-e", "-z", "-x", "-g")
 
 
 def available_tools(names=None):
@@ -36,10 +41,33 @@ def available_tools(names=None):
     return [n for n in names if os.access(TOOLS[n], os.X_OK)]
 
 
+def _opt(a):
+    return a.split("=")[0]
+
+
 def supports(tool, args):
+    if tool == "kext2":
+        return not any(a in KEXT2_DROPPED for a in args)
+    if any(_opt(a) in KEXT2_ONLY for a in args):
+        return False
     if tool == "xgenext2fs":
-        return not any(a.split("=")[0] in EXTENSIONS for a in args)
+        return not any(_opt(a) in EXTENSIONS for a in args)
     return True
+
+
+def tool_args(tool, args):
+    """The command line for `tool`: kext2 has no -B (its blocks are always
+    4 KiB), so the block size is left out; the file content is the same."""
+    if tool != "kext2":
+        return list(args)
+    out = []
+    it = iter(args)
+    for a in it:
+        if a == "-B":
+            next(it, None)
+        else:
+            out.append(a)
+    return out
 
 
 def sha256_file(path):
@@ -53,7 +81,7 @@ def sha256_file(path):
 def run_tool(tool, args, image, env=None, cwd=None, measure=False):
     """Run a builder. Returns dict(rc, seconds, rss, footprint, stderr): peak
     resident set size and, on macOS, peak memory footprint (bytes)."""
-    cmd = [TOOLS[tool]] + list(args) + [image]
+    cmd = [TOOLS[tool]] + tool_args(tool, args) + [image]
     if measure and sys.platform == "darwin":
         cmd = ["/usr/bin/time", "-l"] + cmd
     full_env = dict(os.environ)

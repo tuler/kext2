@@ -11,8 +11,8 @@ use crate::cli::TimeMode;
 use crate::dirent::{self, Entry};
 use crate::error::{io_err, Error, Result};
 use crate::format::{self, GroupDesc, Inode, Super};
+use crate::geometry::{BS, IPB, MAX_PER_GROUP};
 use crate::plan::Plan;
-use crate::runs::is_zero_block;
 use crate::tree::{Data, Kind, NodeId, Tree, NONE, ROOT};
 use std::collections::BTreeMap;
 use std::fs::{File, OpenOptions};
@@ -25,10 +25,7 @@ use std::sync::{Condvar, Mutex};
 pub struct Settings {
     pub t_fs: i64,
     pub time: TimeMode,
-    pub fill: u8,
-    pub creator_os: u32,
     pub label: [u8; 16],
-    pub uuid: [u8; 16],
 }
 
 /// Final inode time of a node (R-TIME-3, R-TIME-4).
@@ -105,21 +102,15 @@ impl<'a> Renderer<'a> {
         let sb = Super {
             inodes_count: geo.inodes_count() as u32,
             blocks_count: geo.blocks as u32,
-            r_blocks_count: plan.reserved as u32,
             free_blocks_count: free_blocks as u32,
             free_inodes_count: free_inodes as u32,
-            first_data_block: geo.fdb as u32,
-            log_block_size: geo.bs.trailing_zeros() - 10,
             blocks_per_group: geo.bpg as u32,
             inodes_per_group: geo.ipg as u32,
             wtime: s.t_fs as u32,
-            creator_os: s.creator_os,
-            feature_incompat: if plan.filetype { format::FEATURE_INCOMPAT_FILETYPE } else { 0 },
             feature_ro_compat: ro,
             volume_name: s.label,
-            uuid: s.uuid,
         };
-        let bs = geo.bs as usize;
+        let bs = BS as usize;
         let mut gdt = vec![0u8; geo.gdb as usize * bs];
         for g in 0..geo.groups {
             let d = GroupDesc {
@@ -144,10 +135,10 @@ impl<'a> Renderer<'a> {
     /// directories, indirect blocks, file bytes actually present).
     pub fn estimated_payload(&self) -> u64 {
         let geo = &self.plan.geo;
-        let bs = geo.bs as u64;
+        let bs = BS as u64;
         // metadata: superblock/GDT copies, bitmaps, used inode-table blocks
         let mut blocks: u64 = (0..geo.groups)
-            .map(|g| geo.overhead(g) - geo.itb + (self.plan.used_inodes[g as usize] as u64).div_ceil(geo.ipb()))
+            .map(|g| geo.overhead(g) - geo.itb + (self.plan.used_inodes[g as usize] as u64).div_ceil(IPB))
             .sum();
         let mut bytes = 0u64;
         for (id, n) in self.tree.nodes.iter().enumerate() {
@@ -157,16 +148,11 @@ impl<'a> Renderer<'a> {
             let nb = self.plan.nb[id];
             match &n.kind {
                 Kind::Reg(r) => {
-                    let data_blocks = match &r.zmap {
-                        Some(z) => z.count(),
-                        None => r.size.div_ceil(bs),
-                    };
-                    blocks += nb - data_blocks; // indirect blocks
+                    blocks += nb - r.size.div_ceil(bs); // indirect blocks
                     bytes += match &r.data {
                         Data::Zero => 0,
                         Data::Host { .. } => r.size,
                         Data::Source { regions, .. } => regions.iter().map(|g| g.len).sum(),
-                        Data::Image { map, .. } => map.iter().map(|m| m.2 * bs).sum(),
                     };
                 }
                 _ => blocks += nb,
@@ -180,11 +166,8 @@ impl<'a> Renderer<'a> {
         let geo = &self.plan.geo;
         let end = b0 + n;
         let mut b = b0;
-        if b < geo.fdb {
-            b = geo.fdb; // boot block: zero
-        }
         while b < end {
-            let g = (b - geo.fdb) / geo.bpg;
+            let g = b / geo.bpg;
             let gend = geo.start(g) + geo.size(g);
             let e = end.min(gend);
             self.render_group(g, b, e, b0, buf, marks, cache)?;
@@ -205,7 +188,7 @@ impl<'a> Renderer<'a> {
         cache: &mut Cache,
     ) -> Result<()> {
         let geo = &self.plan.geo;
-        let bs = geo.bs as usize;
+        let bs = BS as usize;
         let off = |blk: u64| ((blk - b0) as usize) * bs;
         let gs = geo.start(g);
         let mut blk = gs;
@@ -213,7 +196,7 @@ impl<'a> Renderer<'a> {
         if geo.has_super(g) {
             if inr(gs) {
                 let sbb = self.sb.to_bytes(g as u16);
-                let o = off(gs) + if g == 0 && geo.fdb == 0 { 1024 } else { 0 };
+                let o = off(gs) + if g == 0 { 1024 } else { 0 }; // after the boot record
                 buf[o..o + 1024].copy_from_slice(&sbb);
                 marks.add(o, 1024);
             }
@@ -237,7 +220,7 @@ impl<'a> Renderer<'a> {
             let o = off(bb + 1);
             let out = &mut buf[o..o + bs];
             set_bits(out, 0, self.plan.used_inodes[g as usize] as u64);
-            set_bits(out, geo.ipg, 8 * bs as u64);
+            set_bits(out, geo.ipg, MAX_PER_GROUP);
             marks.add(o, bs);
         }
         let it = bb + 2;
@@ -276,13 +259,12 @@ impl<'a> Renderer<'a> {
             set_bits(out, ov + (s - lo), ov + (e - lo));
             i += 1;
         }
-        set_bits(out, geo.size(g), 8 * geo.bs as u64);
+        set_bits(out, geo.size(g), MAX_PER_GROUP);
     }
 
     /// Inode-table block `k` of group `g`. Returns false if it is all zero.
     fn inode_block(&self, g: u64, k: u64, out: &mut [u8]) -> bool {
-        let geo = &self.plan.geo;
-        let ipb = geo.ipb();
+        let ipb = IPB;
         let used = self.plan.used_inodes[g as usize] as u64;
         let first = k * ipb;
         if first >= used {
@@ -306,7 +288,7 @@ impl<'a> Renderer<'a> {
     pub fn inode(&self, id: NodeId) -> Inode {
         let node = self.tree.node(id);
         let plan = self.plan;
-        let bs = plan.geo.bs as u64;
+        let bs = BS as u64;
         let nb = plan.nb[id as usize];
         let mut ino = Inode {
             mode: node.kind.mode_bits() | node.perm,
@@ -355,29 +337,16 @@ impl<'a> Renderer<'a> {
         mark_base: usize,
         cache: &mut Cache,
     ) -> Result<()> {
-        let bs = self.plan.geo.bs as usize;
+        let bs = BS as usize;
         let ex = &self.plan.extents;
         let mut i = ex.partition_point(|e| e.start + e.len as u64 <= d0);
         let mut pos = d0;
-        let fill = self.s.fill;
-        let gap = |from: u64, to: u64, out: &mut [u8], marks: &mut Marks| {
-            if fill != 0 && to > from {
-                let o = ((from - d0) as usize) * bs;
-                let l = ((to - from) as usize) * bs;
-                out[o..o + l].fill(fill);
-                marks.add(mark_base + o, l);
-            }
-        };
+        // free blocks between extents stay zero
         while pos < d1 {
             if i >= ex.len() || ex[i].start >= d1 {
-                gap(pos, d1, out, marks);
                 break;
             }
             let e = ex[i];
-            if e.start > pos {
-                gap(pos, e.start, out, marks);
-                pos = e.start;
-            }
             let s = pos.max(e.start);
             let t = d1.min(e.start + e.len as u64);
             let o = ((s - d0) as usize) * bs;
@@ -462,9 +431,8 @@ impl<'a> Renderer<'a> {
 
     fn dir_block(&self, d: NodeId, k: u64, out: &mut [u8]) {
         let dp = self.plan.dirs[d as usize].as_ref().unwrap();
-        let ft = self.plan.filetype;
         if k as usize >= dp.starts.len() {
-            dirent::write_block(out, std::iter::empty(), ft);
+            dirent::write_block(out, std::iter::empty());
             return;
         }
         let children = self.tree.children(d);
@@ -480,7 +448,7 @@ impl<'a> Renderer<'a> {
                 Entry { ino: ino[*c as usize], name, file_type: tree.node(*c).kind.file_type() }
             }
         });
-        dirent::write_block(out, entries, ft);
+        dirent::write_block(out, entries);
     }
 
     /// Read logical blocks `[l0, l0+n)` of regular file `id` into `out`.
@@ -500,7 +468,7 @@ impl<'a> Renderer<'a> {
             Kind::Reg(r) => r,
             _ => unreachable!(),
         };
-        let bs = self.plan.geo.bs as u64;
+        let bs = BS as u64;
         let off = l0 * bs;
         let len = ((l0 + n) * bs).min(r.size).saturating_sub(off) as usize;
         let dst = &mut out[..len];
@@ -549,34 +517,6 @@ impl<'a> Renderer<'a> {
                     read_exact_at(&f.file, d, g.src_off + (s - g.off)).map_err(|e| io_err(&f.name, e))?;
                     mark(s - off, e - off);
                     i += 1;
-                }
-            }
-            Data::Image { src, bs: ibs, map } => {
-                let f = &self.tree.sources[*src as usize];
-                let ibs = *ibs as u64;
-                let end = off + len as u64;
-                let (lb0, lb1) = (off / ibs, end.div_ceil(ibs));
-                let mut i = map.partition_point(|m| m.0 + m.2 <= lb0);
-                while i < map.len() && map[i].0 < lb1 {
-                    let (ml, mp, mc) = map[i];
-                    let s = (ml * ibs).max(off);
-                    let e = ((ml + mc) * ibs).min(end);
-                    if s < e {
-                        let d = &mut dst[(s - off) as usize..(e - off) as usize];
-                        read_exact_at(&f.file, d, mp * ibs + (s - ml * ibs)).map_err(|e| io_err(&f.name, e))?;
-                        mark(s - off, e - off);
-                    }
-                    i += 1;
-                }
-            }
-        }
-        if r.zmap.is_some() {
-            for (k, blk) in out.chunks_exact(bs as usize).enumerate() {
-                if is_zero_block(blk) {
-                    return Err(Error::fatal(format!(
-                        "file data changed since it was scanned (block {} became zero)",
-                        l0 + k as u64
-                    )));
                 }
             }
         }
@@ -691,9 +631,8 @@ pub fn write_image(r: &Renderer, path: &std::ffi::OsStr) -> Result<()> {
 /// accepts). Regular files skip the zero parts of every chunk (holes);
 /// devices and streams get every byte.
 pub fn write_image_threads(r: &Renderer, path: &std::ffi::OsStr, threads: usize) -> Result<()> {
-    let geo = &r.plan.geo;
-    let bs = geo.bs as u64;
-    let total = geo.blocks;
+    let bs = BS as u64;
+    let total = r.plan.geo.blocks;
     let mut out = if path == "-" {
         Out::Stream(Box::new(std::io::stdout()))
     } else {

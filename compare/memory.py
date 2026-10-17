@@ -25,7 +25,7 @@ import sys
 import time
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-from common import TOOLS, WORK, available_tools, rmtree
+from common import TOOLS, WORK, available_tools, rmtree, supports, tool_args
 import gen
 
 
@@ -108,6 +108,9 @@ def main():
         cases.append(("file count", f"{n:,} files of 1 KiB, 4 KiB blocks", ["-B", "4096", "-f", "-d", d]))
     for g in [int(x) for x in args.empty.split(",") if x]:
         cases.append(("image size", f"empty {g} GiB image", ["-B", "4096", "-f", "-b", str(g << 18)]))
+    # kext2 sizes images from the content: an empty image is free space only
+    alt = {f"empty {g} GiB image": {"kext2": ["-f", "--free-space", f"{g}G"]}
+           for g in [int(x) for x in args.empty.split(",") if x]}
 
     rows = []
     for group, label, cargs in cases:
@@ -117,9 +120,12 @@ def main():
             variants.append(("kext2 (1 thread)", {"KEXT2_THREADS": "1"}))
         for name, env in variants:
             tool = name.split(" ")[0]
+            targs = alt.get(label, {}).get(tool, cargs)
+            if not supports(tool, targs):
+                continue
             if os.path.exists(img):
                 os.remove(img)
-            rc, secs, rss, foot, err = measured([TOOLS[tool]] + cargs + [img], env)
+            rc, secs, rss, foot, err = measured([TOOLS[tool]] + tool_args(tool, targs) + [img], env)
             row["tools"][name] = (rc, secs, rss, foot)
             print(f"  {label:42} {name:18} rc={rc} {secs:7.2f}s  rss={mib(rss):>9} MiB  footprint={mib(foot):>9} MiB",
                   flush=True)

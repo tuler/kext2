@@ -1,7 +1,6 @@
 //! The in-memory tree built by the scan phase (SPEC §3, §4).
 
 use crate::error::{show, warn, Error, Result};
-use crate::runs::Runs;
 use std::collections::HashMap;
 use std::fs::File;
 use std::path::PathBuf;
@@ -30,18 +29,12 @@ pub enum Data {
     /// Regions of a registered source file (tar archive or spool). Bytes not
     /// covered by a region are zero.
     Source { src: u32, regions: Box<[Region]> },
-    /// Blocks of a starting image (`-x`): runs of (logical block, physical
-    /// block, count) with the image block size. Unmapped blocks are zero.
-    Image { src: u32, bs: u32, map: Box<[(u64, u64, u64)]> },
 }
 
 #[derive(Debug)]
 pub struct Reg {
     pub size: u64,
     pub data: Data,
-    /// With `-z`: the logical blocks holding non-zero bytes (boxed: most
-    /// files have none, and every regular file carries the field).
-    pub zmap: Option<Box<Runs>>,
 }
 
 #[derive(Debug, Default)]
@@ -104,15 +97,13 @@ pub struct Node {
     pub mtime: i64,
     /// Created because a path needed it (R-IN-4).
     pub implicit: bool,
-    /// The provisional lost+found (R-RES-1).
+    /// The generated lost+found (R-RES-1).
     pub generated: bool,
-    /// Touched by a device-table fix-up.
-    pub fixed_up: bool,
 }
 
 impl Node {
     pub fn new(kind: Kind, perm: u16, uid: u32, gid: u32, mtime: i64) -> Node {
-        Node { kind, perm: perm & 0o7777, uid, gid, mtime, implicit: false, generated: false, fixed_up: false }
+        Node { kind, perm: perm & 0o7777, uid, gid, mtime, implicit: false, generated: false }
     }
     pub fn dir(perm: u16, uid: u32, gid: u32, mtime: i64) -> Node {
         Node::new(Kind::Dir(Box::default()), perm, uid, gid, mtime)

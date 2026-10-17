@@ -7,27 +7,18 @@ pub const VERSION: &str = env!("CARGO_PKG_VERSION");
 
 pub const USAGE: &str = "\
 Usage: kext2 [options] image
-Create an ext2 filesystem image from directories, tar archives and device
-tables, without root privileges ('-' as image writes to standard output).
+Create an ext2 filesystem image (4 KiB blocks) from directories, tar archives
+and device tables, without root privileges ('-' as image writes to standard
+output).
 
-  -x, --starting-image <image>      Start from the content of an existing image
   -d, --root <directory>[:path]     Copy a local directory into path (or root)
   -a, --tarball <file>[:path]       Copy a tar archive (plain, gzip, bzip2, xz or
                                     zstd; '-' = stdin) into path (or root)
   -D, --devtable <file>[:path]      Add or fix up nodes from a device table
-  -B, --block-size <bytes>          1024 (default), 2048 or 4096
-  -b, --size-in-blocks <blocks>     Exact image size (computed otherwise)
-  -r, --readjustment <[+]blocks>    +N: N free blocks added to the computed
-                                    size; N: exactly N blocks (as -b N)
-  -i, --bytes-per-inode <bytes>     Inode density (only together with -b)
-  -N, --number-of-inodes <count>    Minimum number of inodes
+      --free-space <bytes>          Free space to leave in the image, with one
+                                    free inode per 16 KiB of it (suffixes K, M,
+                                    G, T: powers of 1024)
   -L, --volume-label <string>       Volume label (up to 16 bytes)
-  -m, --reserved-percentage <pct>   Reserved blocks percentage (default 5)
-  -o, --creator-os <os>             'linux' (default), 'hurd', 'freebsd',
-                                    'lites' or a number
-  -g, --block-map <path>            Write a block map file for this path
-  -e, --fill-value <value>          Fill unallocated blocks with this byte
-  -z, --allow-holes                 Store all-zero blocks as holes
   -f, --faketime                    Every timestamp is 0
   -q, --squash <uid>                Same as \"-U <uid> -P\"
   -U, --squash-uids <uid>           Every file is owned by <uid>:<uid>
@@ -61,19 +52,11 @@ pub struct Layer {
     pub path: Vec<Vec<u8>>,
 }
 
-/// `-r` (SPEC Appendix C.1).
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum Readjust {
-    /// `-r +N`: N extra free blocks on top of the automatic size.
-    Extra(u64),
-    /// `-r N`: exactly N blocks, as if `-b N` had been given.
-    Absolute(u64),
-}
-
 /// Timestamp policy (R-TIME-1).
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum TimeMode {
     /// Use `SOURCE_DATE_EPOCH` or the wall clock; file times from the inputs.
+    #[default]
     Default,
     /// `-f`: every time is 0.
     Fake,
@@ -83,57 +66,17 @@ pub enum TimeMode {
     Clamp(i64),
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct Options {
     pub image: OsString,
-    pub starting_image: Option<OsString>,
     pub layers: Vec<Layer>,
-    pub block_size: u32,
-    pub block_size_set: bool,
-    pub blocks: Option<u64>,
-    pub readjust: Option<Readjust>,
-    pub bytes_per_inode: Option<u64>,
-    pub inodes: Option<u64>,
+    /// `--free-space`, in bytes.
+    pub free_space: u64,
     pub label: Option<Vec<u8>>,
-    pub reserved_pct: u32,
-    pub reserved_set: bool,
-    pub creator_os: u32,
-    pub creator_os_set: bool,
-    pub block_maps: Vec<Vec<u8>>,
-    pub fill: u8,
-    pub holes: bool,
     pub time: TimeMode,
     pub squash_uid: Option<u32>,
     pub squash_perms: bool,
     pub verbose: bool,
-}
-
-impl Default for Options {
-    fn default() -> Self {
-        Options {
-            image: OsString::new(),
-            starting_image: None,
-            layers: Vec::new(),
-            block_size: 1024,
-            block_size_set: false,
-            blocks: None,
-            readjust: None,
-            bytes_per_inode: None,
-            inodes: None,
-            label: None,
-            reserved_pct: 5,
-            reserved_set: false,
-            creator_os: 0,
-            creator_os_set: false,
-            block_maps: Vec::new(),
-            fill: 0,
-            holes: false,
-            time: TimeMode::Default,
-            squash_uid: None,
-            squash_perms: false,
-            verbose: false,
-        }
-    }
 }
 
 /// Result of parsing the command line.
@@ -159,23 +102,14 @@ struct LongOpt {
 
 const TIMESTAMP: char = '\u{1}';
 const CLAMP: char = '\u{2}';
+const FREE_SPACE: char = '\u{3}';
 
 const LONG: &[LongOpt] = &[
-    LongOpt { name: "starting-image", has_arg: HasArg::Required, val: 'x' },
     LongOpt { name: "root", has_arg: HasArg::Required, val: 'd' },
     LongOpt { name: "devtable", has_arg: HasArg::Required, val: 'D' },
     LongOpt { name: "tarball", has_arg: HasArg::Required, val: 'a' },
-    LongOpt { name: "block-size", has_arg: HasArg::Required, val: 'B' },
-    LongOpt { name: "size-in-blocks", has_arg: HasArg::Required, val: 'b' },
-    LongOpt { name: "readjustment", has_arg: HasArg::Required, val: 'r' },
-    LongOpt { name: "bytes-per-inode", has_arg: HasArg::Required, val: 'i' },
-    LongOpt { name: "number-of-inodes", has_arg: HasArg::Required, val: 'N' },
+    LongOpt { name: "free-space", has_arg: HasArg::Required, val: FREE_SPACE },
     LongOpt { name: "volume-label", has_arg: HasArg::Required, val: 'L' },
-    LongOpt { name: "reserved-percentage", has_arg: HasArg::Required, val: 'm' },
-    LongOpt { name: "creator-os", has_arg: HasArg::Required, val: 'o' },
-    LongOpt { name: "block-map", has_arg: HasArg::Required, val: 'g' },
-    LongOpt { name: "fill-value", has_arg: HasArg::Required, val: 'e' },
-    LongOpt { name: "allow-holes", has_arg: HasArg::No, val: 'z' },
     LongOpt { name: "faketime", has_arg: HasArg::No, val: 'f' },
     LongOpt { name: "squash", has_arg: HasArg::Required, val: 'q' },
     LongOpt { name: "squash-uids", has_arg: HasArg::Required, val: 'U' },
@@ -187,7 +121,7 @@ const LONG: &[LongOpt] = &[
     LongOpt { name: "clamp-timestamps", has_arg: HasArg::Required, val: CLAMP },
 ];
 
-const SHORT: &str = "x:d:D:a:B:b:r:i:N:L:m:o:g:e:zfq:U:PhVv";
+const SHORT: &str = "d:D:a:L:fq:U:PhVv";
 
 fn short_has_arg(c: char) -> Option<HasArg> {
     let s = SHORT.as_bytes();
@@ -199,6 +133,7 @@ fn opt_name(c: char) -> String {
     match c {
         TIMESTAMP => "--timestamp".into(),
         CLAMP => "--clamp-timestamps".into(),
+        FREE_SPACE => "--free-space".into(),
         c => {
             let long = LONG.iter().find(|l| l.val == c).map(|l| l.name).unwrap_or("?");
             format!("-{c}/--{long}")
@@ -261,25 +196,31 @@ pub fn parse_image_path(path: &[u8]) -> std::result::Result<Vec<Vec<u8>>, ()> {
     Ok(out)
 }
 
-fn parse_os(arg: &[u8]) -> Result<u32> {
-    let lower: Vec<u8> = arg.to_ascii_lowercase();
-    match &lower[..] {
-        b"linux" => Ok(0),
-        b"hurd" => Ok(1),
-        b"freebsd" => Ok(3),
-        b"lites" => Ok(4),
+/// Parse a byte count: a decimal number with an optional binary suffix
+/// (`K`, `M`, `G`, `T`, optionally followed by `iB`).
+pub fn parse_size(opt: char, arg: &[u8]) -> Result<u64> {
+    let digits = arg.iter().take_while(|b| b.is_ascii_digit()).count();
+    let (num, suffix) = arg.split_at(digits);
+    let shift = match suffix.to_ascii_uppercase().as_slice() {
+        b"" => 0,
+        b"K" | b"KIB" => 10,
+        b"M" | b"MIB" => 20,
+        b"G" | b"GIB" => 30,
+        b"T" | b"TIB" => 40,
         _ => {
-            if !arg.is_empty() && arg.iter().all(|b| b.is_ascii_digit()) {
-                Ok(parse_num('o', arg, 0, u32::MAX as u64)? as u32)
-            } else {
-                Err(Error::usage(format!(
-                    "invalid creator OS '{}': expected linux, hurd, freebsd, lites or a number",
-                    String::from_utf8_lossy(arg)
-                )))
-            }
+            return Err(Error::usage(format!(
+                "invalid value '{}' for {}: expected a number of bytes, optionally with K, M, G or T",
+                String::from_utf8_lossy(arg),
+                opt_name(opt)
+            )))
         }
-    }
+    };
+    let max = MAX_FREE_SPACE >> shift;
+    Ok(parse_num(opt, num, 0, max)? << shift)
 }
+
+/// Largest `--free-space`: 16 TiB, the size limit of ext2 with 4 KiB blocks.
+pub const MAX_FREE_SPACE: u64 = 1 << 44;
 
 #[derive(Default)]
 struct TimeSeen {
@@ -291,36 +232,10 @@ struct TimeSeen {
 fn apply(o: &mut Options, ts: &mut TimeSeen, c: char, arg: Option<&[u8]>) -> Result<Option<Action>> {
     let a = || arg.unwrap_or(b"");
     match c {
-        'x' => {
-            if o.starting_image.is_some() {
-                return Err(Error::usage("-x/--starting-image may be given only once"));
-            }
-            o.starting_image = Some(crate::host::os_string(a().to_vec()));
-        }
         'd' => o.layers.push(parse_layer(LayerKind::Dir, a())?),
         'a' => o.layers.push(parse_layer(LayerKind::Tar, a())?),
         'D' => o.layers.push(parse_layer(LayerKind::DevTable, a())?),
-        'B' => {
-            let v = a();
-            let bs = match v {
-                b"1024" => 1024,
-                b"2048" => 2048,
-                b"4096" => 4096,
-                _ => return Err(Error::usage("Valid block sizes: 1024, 2048 or 4096.")),
-            };
-            o.block_size = bs;
-            o.block_size_set = true;
-        }
-        'b' => o.blocks = Some(parse_num(c, a(), 1, u32::MAX as u64)?),
-        'r' => {
-            let v = a();
-            o.readjust = Some(match v.strip_prefix(b"+") {
-                Some(n) => Readjust::Extra(parse_num(c, n, 0, u32::MAX as u64)?),
-                None => Readjust::Absolute(parse_num(c, v, 1, u32::MAX as u64)?),
-            });
-        }
-        'i' => o.bytes_per_inode = Some(parse_num(c, a(), 1, u64::MAX)?),
-        'N' => o.inodes = Some(parse_num(c, a(), 0, u32::MAX as u64)?),
+        FREE_SPACE => o.free_space = parse_size(c, a())?,
         'L' => {
             let mut l = a().to_vec();
             if l.len() > 16 {
@@ -329,17 +244,6 @@ fn apply(o: &mut Options, ts: &mut TimeSeen, c: char, arg: Option<&[u8]>) -> Res
             }
             o.label = Some(l);
         }
-        'm' => {
-            o.reserved_pct = parse_num(c, a(), 0, 100)? as u32;
-            o.reserved_set = true;
-        }
-        'o' => {
-            o.creator_os = parse_os(a())?;
-            o.creator_os_set = true;
-        }
-        'g' => o.block_maps.push(a().to_vec()),
-        'e' => o.fill = parse_num(c, a(), 0, 255)? as u8,
-        'z' => o.holes = true,
         'f' => {
             ts.fake = true;
             o.time = TimeMode::Fake;
@@ -499,19 +403,19 @@ mod tests {
 
     #[test]
     fn clustering_and_attached() {
-        let o = run(&["-zfb", "300", "img"]).unwrap();
-        assert!(o.holes);
+        let o = run(&["-fPU", "300", "img"]).unwrap();
+        assert!(o.squash_perms);
         assert_eq!(o.time, TimeMode::Fake);
-        assert_eq!(o.blocks, Some(300));
-        let o = run(&["-fzb300", "img"]).unwrap();
-        assert_eq!(o.blocks, Some(300));
-        let o = run(&["-b300", "img", "-b", "400"]).unwrap();
-        assert_eq!(o.blocks, Some(400));
+        assert_eq!(o.squash_uid, Some(300));
+        let o = run(&["-fU300", "img"]).unwrap();
+        assert_eq!(o.squash_uid, Some(300));
+        let o = run(&["-U300", "img", "-U", "400"]).unwrap();
+        assert_eq!(o.squash_uid, Some(400));
     }
 
     #[test]
     fn permutation_and_dashdash() {
-        let o = run(&["-b", "300", "img", "-d", "dir"]).unwrap();
+        let o = run(&["-U", "300", "img", "-d", "dir"]).unwrap();
         assert_eq!(o.image, OsString::from("img"));
         assert_eq!(o.layers.len(), 1);
         let o = run(&["--", "-img"]).unwrap();
@@ -522,13 +426,13 @@ mod tests {
 
     #[test]
     fn long_options() {
-        let o = run(&["--size-in-blocks=300", "--root", "ab:/x/./y/", "img"]).unwrap();
-        assert_eq!(o.blocks, Some(300));
+        let o = run(&["--free-space=300", "--root", "ab:/x/./y/", "img"]).unwrap();
+        assert_eq!(o.free_space, 300);
         assert_eq!(o.layers[0].src, OsString::from("ab"));
         assert_eq!(o.layers[0].path, vec![b"x".to_vec(), b"y".to_vec()]);
-        let o = run(&["--size", "300", "img"]).unwrap();
-        assert_eq!(o.blocks, Some(300));
-        assert!(run(&["--b", "300", "img"]).is_err());
+        let o = run(&["--free", "300", "img"]).unwrap();
+        assert_eq!(o.free_space, 300);
+        assert!(run(&["--squash-", "300", "img"]).is_err());
         assert!(run(&["--bogus", "img"]).is_err());
         assert!(run(&["--faketime=1", "img"]).is_err());
         let o = run(&["--squash=7", "img"]).unwrap();
@@ -536,6 +440,15 @@ mod tests {
         assert!(o.squash_perms);
         let o = run(&["--timestamp", "5", "img"]).unwrap();
         assert_eq!(o.time, TimeMode::Fixed(5));
+    }
+
+    #[test]
+    fn dropped_options() {
+        for opt in ["-B", "-b", "-r", "-N", "-i", "-m", "-o", "-e", "-g", "-x"] {
+            assert!(run(&[opt, "1", "img"]).is_err(), "{opt}");
+        }
+        assert!(run(&["-z", "img"]).is_err());
+        assert!(run(&["--block-size", "4096", "img"]).is_err());
     }
 
     #[test]
@@ -557,41 +470,31 @@ mod tests {
 
     #[test]
     fn numbers() {
-        assert!(run(&["-b", "0", "img"]).is_err());
-        assert!(run(&["-b", "+5", "img"]).is_err());
-        assert!(run(&["-b", "0x10", "img"]).is_err());
-        assert!(run(&["-b", "4294967296", "img"]).is_err());
-        assert!(run(&["-m", "101", "img"]).is_err());
-        assert!(run(&["-e", "256", "img"]).is_err());
         assert!(run(&["-U", "4294967295", "img"]).is_err());
         assert_eq!(run(&["-U", "4294967294", "img"]).unwrap().squash_uid, Some(4294967294));
+        assert!(run(&["-U", "+5", "img"]).is_err());
+        assert!(run(&["-U", "0x10", "img"]).is_err());
         assert!(run(&["--timestamp", "2147483648", "img"]).is_err());
-        assert!(run(&["-B", "512", "img"]).is_err());
-        assert_eq!(run(&["-B", "4096", "img"]).unwrap().block_size, 4096);
+        assert!(run(&["--timestamp", "-1", "img"]).is_err());
     }
 
     #[test]
-    fn readjust_forms() {
-        assert_eq!(run(&["-r", "+1000", "img"]).unwrap().readjust, Some(Readjust::Extra(1000)));
-        assert_eq!(run(&["-r", "+0", "img"]).unwrap().readjust, Some(Readjust::Extra(0)));
-        assert_eq!(run(&["--readjustment=+5", "img"]).unwrap().readjust, Some(Readjust::Extra(5)));
-        assert_eq!(run(&["-r40000", "img"]).unwrap().readjust, Some(Readjust::Absolute(40000)));
-        assert_eq!(run(&["-r", "1", "-r", "+2", "img"]).unwrap().readjust, Some(Readjust::Extra(2)));
-        for bad in ["-5", "+", "++5", "+-5", "0", "+4294967296", "4294967296", "1x", "+0x10", " 5"] {
-            assert!(run(&["-r", bad, "img"]).is_err(), "{bad}");
+    fn free_space() {
+        let fs = |v: &str| run(&["--free-space", v, "img"]).map(|o| o.free_space);
+        assert_eq!(run(&["img"]).unwrap().free_space, 0);
+        assert_eq!(fs("0").unwrap(), 0);
+        assert_eq!(fs("12345").unwrap(), 12345);
+        assert_eq!(fs("4k").unwrap(), 4096);
+        assert_eq!(fs("3M").unwrap(), 3 << 20);
+        assert_eq!(fs("2GiB").unwrap(), 2 << 30);
+        assert_eq!(fs("16T").unwrap(), 16 << 40);
+        for bad in ["", "-1", "+5", "1.5G", "5X", "K", "17T", "1 G", "0x10"] {
+            assert!(fs(bad).is_err(), "{bad}");
         }
-        // no other option gains a sign
-        assert!(run(&["-b", "+5", "img"]).is_err());
-        assert!(run(&["-N", "+5", "img"]).is_err());
     }
 
     #[test]
-    fn creator_os_and_label() {
-        assert_eq!(run(&["-o", "HURD", "img"]).unwrap().creator_os, 1);
-        assert_eq!(run(&["-o", "FreeBSD", "img"]).unwrap().creator_os, 3);
-        assert_eq!(run(&["-o", "7", "img"]).unwrap().creator_os, 7);
-        assert!(run(&["-o", "masix", "img"]).is_err());
-        assert!(run(&["-o", "4294967296", "img"]).is_err());
+    fn label() {
         let o = run(&["-L", "0123456789abcdefXYZ", "img"]).unwrap();
         assert_eq!(o.label.unwrap(), b"0123456789abcdef".to_vec());
     }
@@ -612,7 +515,6 @@ mod tests {
         assert_eq!(l.src, OsString::from("a"));
         assert_eq!(l.path, vec![b"b:c".to_vec()]);
         assert!(parse_layer(LayerKind::Dir, b"ab:/x/../y").is_err());
-        assert!(run(&["-x", "a", "-x", "b", "img"]).is_err());
     }
 
     #[test]

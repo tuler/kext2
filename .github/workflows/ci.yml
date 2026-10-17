@@ -63,14 +63,14 @@ jobs:
         shell: bash
         run: |
           mkdir -p smoke/etc && echo hello > smoke/etc/hostname
-          target/release/kext2.exe -B 4096 -f -d smoke smoke.ext2
+          target/release/kext2.exe -f --free-space 1M -d smoke smoke.ext2
           ls -l smoke.ext2
       - name: Node binding
         working-directory: crates/kext2-node
         shell: bash
         run: |
           npm run build
-          node -e "const k = require('./index.js'); k.buildBuffer({ sizeInBlocks: 1024, faketime: true }).then(b => console.log('kext2', k.version(), b.length))"
+          node -e "const k = require('./index.js'); k.buildBuffer({ freeSpace: 4 << 20, faketime: true }).then(b => console.log('kext2', k.version(), b.length))"
 
   # Black-box comparison with xgenext2fs and mkext2 (compare/run.py): every
   # image is checked with e2fsck and a read-only Linux kernel mount.

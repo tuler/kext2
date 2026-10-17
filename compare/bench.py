@@ -46,6 +46,8 @@ def main():
         ("tar.gz (4 KiB blocks)", ["-B", "4096", "-f", "-a", os.path.join(base, "rootfs.tar.gz")]),
         (f"empty {args.mib} MiB image", ["-B", "4096", "-f", "-b", blocks_empty]),
     ]
+    # kext2 sizes images from the content: an empty image is free space only
+    alt = {f"empty {args.mib} MiB image": {"kext2": ["-f", "--free-space", f"{args.mib}M"]}}
     skip = set(s for s in args.skip.split(",") if s)
     results = []
     for name, cargs in cases:
@@ -53,14 +55,15 @@ def main():
             continue
         row = {"case": name, "tools": {}}
         for tool in tools:
-            if not supports(tool, cargs):
+            targs = alt.get(name, {}).get(tool, cargs)
+            if not supports(tool, targs):
                 continue
             img = os.path.join(base, f"{tool}.{len(results)}.img")
             best = None
             for _ in range(args.runs):
                 if os.path.exists(img):
                     os.remove(img)
-                r = run_tool(tool, cargs, img, measure=True)
+                r = run_tool(tool, targs, img, measure=True)
                 if r["rc"] != 0:
                     best = r
                     break

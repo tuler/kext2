@@ -1,9 +1,11 @@
 # kext2
 
 kext2 builds ext2 filesystem images from host directories, tar archives and
-device tables, without root privileges. It accepts the command line of
-`xgenext2fs` 1.5.6, produces the same file content, and writes images that are
-byte-for-byte reproducible.
+device tables, without root privileges. The images are byte-for-byte
+reproducible and hold the same file content as `xgenext2fs` 1.5.6 would
+store. kext2 started with the xgenext2fs command line; it now keeps only the
+options that matter for reproducible root filesystems (see
+[Differences from xgenext2fs](#differences-from-xgenext2fs)).
 
 It was written in a clean room from [`docs/SPEC.md`](docs/SPEC.md) and the
 public ext2 documentation (see [`docs/CLEANROOM.md`](docs/CLEANROOM.md)).
@@ -47,17 +49,16 @@ the Cargo features `gzip`, `bzip2`, `xz` and `zstd`, all on by default.
 ```ts
 import { build, buildBuffer, kext2 } from '@tuler/kext2'
 
-// the command line, in process (the same arguments as xgenext2fs)
-await kext2(['--block-size', '4096', '--faketime', '--readjustment', '+1000', '--root', 'rootfs', 'out.ext2'])
+// the command line, in process
+await kext2(['--faketime', '--free-space', '64M', '--root', 'rootfs', 'out.ext2'])
 
 // typed options; builds run on the libuv thread pool
 const info = await build('out.ext2', {
-  blockSize: 4096,
   faketime: true,
-  readjustment: '+1000',
+  freeSpace: 64 << 20,
   layers: [{ type: 'tar', path: 'rootfs.tar' }, { type: 'dir', path: 'extra', target: '/opt' }],
 })
-const image: Buffer = await buildBuffer({ blockSize: 4096, sizeInBlocks: 2560, faketime: true })
+const image: Buffer = await buildBuffer({ freeSpace: 10 << 20, faketime: true })
 ```
 
 See [`crates/kext2-node/README.md`](crates/kext2-node/README.md).
@@ -71,37 +72,30 @@ kext2 [options] image
 `image` is the output file. `-` writes the image to standard output, which
 can be a pipe. A block device is written in place.
 
+The image always has 4 KiB blocks. Its size is computed from the content:
+the smallest image that holds it, plus `--free-space`.
+
 | Option | Meaning |
 |---|---|
 | `-d, --root DIR[:PATH]` | Copy the host directory `DIR` into the image directory `PATH` (default `/`). |
 | `-a, --tarball TAR[:PATH]` | Copy a tar archive into `PATH`. `-` means standard input. The archive can be plain, gzip, bzip2, xz or zstd; the format is detected from its content. |
 | `-D, --devtable TABLE[:PATH]` | Create or fix up the nodes listed in a device table. `-` means standard input. |
-| `-x, --starting-image IMG` | Start from the content of an existing ext2 image. The new image takes its block size, block count, inode count, reserved count, label, OS and UUID. |
-| `-B, --block-size N` | Block size: 1024 (default), 2048 or 4096. |
-| `-b, --size-in-blocks N` | Exact image size. Without `-b` the size is computed from the content. |
-| `-r, --readjustment [+]N` | `+N`: N extra free blocks on top of the computed size; `N`: exactly N blocks, like `-b N`. Ignored when `-b` is given. |
-| `-N, --number-of-inodes N` | Minimum number of inodes. |
-| `-i, --bytes-per-inode N` | One inode per N bytes of the image (only with `-b`). |
-| `-m, --reserved-percentage N` | Reserved block percentage, 0–100 (default 5). |
+| `--free-space BYTES` | Leave at least `BYTES` free (rounded up to whole blocks), and one free inode per 16 KiB of it. `K`, `M`, `G` and `T` (or `KiB` … `TiB`) are powers of 1024. Default 0. |
 | `-L, --volume-label S` | Volume label, at most 16 bytes. |
-| `-o, --creator-os OS` | `linux`, `hurd`, `freebsd`, `lites` or a number. |
-| `-e, --fill-value N` | Fill free blocks with byte N. |
-| `-z, --allow-holes` | Store all-zero blocks as holes. |
 | `-f, --faketime` | Every timestamp is 0. |
 | `--timestamp S` | Every timestamp is S. |
 | `--clamp-timestamps S` | The filesystem time is S, and file times later than S become S. |
 | `-U, --squash-uids UID` | Files from `-d`/`-a` are owned by `UID:UID`. |
 | `-P, --squash-perms` | Clear the group and other permission bits of files from `-d`/`-a`. |
 | `-q, --squash UID` | Same as `-U UID -P`. |
-| `-g, --block-map PATH` | Write `PATH`'s block list to `./<PATH with / → _>.blk`. |
 | `-v, --verbose` | Print the geometry and phase timings to standard error. |
 | `-h, --help`, `-V, --version` | Show the help text or the version. |
 
 Options follow GNU `getopt_long` rules. You can mix options and the operand,
-cluster short options (`-zfb300`), and abbreviate long options (`--size 300`).
-When an option is given more than once, the last value wins. `-d`, `-a`, `-D`
-and `-g` add up in order. Numbers must be plain decimal and in range; anything
-else is a usage error.
+cluster short options (`-fPU1000`), and abbreviate long options
+(`--free 64M`). When an option is given more than once, the last value wins.
+`-d`, `-a` and `-D` add up in order. Numbers must be plain decimal (with a
+size suffix for `--free-space`) and in range; anything else is a usage error.
 
 Without a timestamp option, the filesystem time comes from
 `$SOURCE_DATE_EPOCH`, or the current time if it is unset. File times always
@@ -111,10 +105,10 @@ Examples:
 
 ```bash
 # a reproducible root filesystem from a container export
-SOURCE_DATE_EPOCH=1700000000 kext2 -B 4096 -a rootfs.tar.zst rootfs.ext2
+SOURCE_DATE_EPOCH=1700000000 kext2 -a rootfs.tar.zst rootfs.ext2
 
-# layers: a base tree, an overlay under /opt, device nodes, explicit size
-kext2 -B 4096 -b 262144 -d base -d overlay:/opt -D devices.txt image.ext2
+# layers: a base tree, an overlay under /opt, device nodes, 1 GiB free
+kext2 --free-space 1G -d base -d overlay:/opt -D devices.txt image.ext2
 
 # stream the image from a pipe into a pipe
 zstd -dc rootfs.tar.zst | kext2 -f -a - - | gzip > rootfs.ext2.gz
@@ -133,11 +127,10 @@ kext2 works in three phases (SPEC §3):
    a path wins (SPEC R-IN-3). Regular files are not read here. kext2 records
    where their data can be read again: the host path, an offset in an
    uncompressed tar, or an offset in a spool file for compressed or piped
-   archives. With `-z`, it also reads each file once to record which blocks
-   are not zero. Decompression runs on its own thread.
+   archives. Decompression runs on its own thread.
 2. **Plan** (`crates/kext2/src/plan.rs`, `geometry.rs`, `layout.rs`, `dirent.rs`). It
-   sorts every directory once, checks the limits, decides on lost+found and
-   the reserved count, and computes the exact size and geometry (SPEC §7).
+   sorts every directory once, checks the limits, and computes the exact
+   size and geometry (SPEC §7).
    Then a single forward data cursor places every inode and block (SPEC §9).
    Each file's blocks, indirect blocks included, form one contiguous run.
    Top-level directories are spread over the block groups when there is free
@@ -155,8 +148,8 @@ Memory has two parts:
 - **Write buffers:** about 40 MiB with 8 threads, 12 MiB with
   `KEXT2_THREADS=1` (slower, same image).
 
-It does not grow with the size of the data: file data is streamed,
-allocations are stored as runs, and zero-block maps are run lists. On a 1 GiB
+It does not grow with the size of the data: file data is streamed and
+allocations are stored as runs. On a 1 GiB
 root filesystem the peak footprint is about 45 MiB.
 [`compare/MEMORY.md`](compare/MEMORY.md) has the measurements. To see the
 heap by phase, build with `--features memstats` (development only).
@@ -167,7 +160,6 @@ Module map:
 |---|---|
 | `cli` | getopt_long parser, option validation |
 | `input::dir`, `input::tar`, `input::devtable` | the three layer types |
-| `image` | reads a starting image for `-x` |
 | `tree` | nodes, the insertion rule, implicit directories |
 | `geometry` | `has_super`, GEOMETRY and SIZE (SPEC §7.3–7.4), data-index → block mapping |
 | `layout` | block-map layout sequences, indirect block counts, size limits |
@@ -175,16 +167,32 @@ Module map:
 | `plan` | limits, lost+found, sizing, inode and block allocation |
 | `format` | superblock, group descriptor and inode encoding |
 | `write` | chunk renderer and output modes |
-| `blockmap` | `-g` files |
-| `runs` | run-length block sets, zero detection |
 
 ## Differences from xgenext2fs
 
-kext2 follows SPEC §13. The differences that change file content:
+kext2 follows SPEC §13 and the reduced option set of SPEC Appendix C.2.
+
+The options are not those of xgenext2fs. kext2 keeps the inputs (`-d`, `-a`,
+`-D`), the timestamp options, `-L`, `-U`, `-P` and `-q`, and adds
+`--free-space`. It does not have:
+
+* `-B`: blocks are always 4 KiB.
+* `-b`, `-r`, `-N`, `-i`: the size comes from the content plus
+  `--free-space`, and the inode count from the files plus one inode per
+  16 KiB of `--free-space`.
+* `-m`: no blocks are reserved for root, so all free space is usable.
+  lost+found always exists, with 4 blocks (16 KiB) as mke2fs makes it.
+* `-o`: the creator OS is Linux, and `filetype` is always set.
+* `-e`: free blocks are zero.
+* `-z`: every file is stored dense. Zero ranges in tar sparse members are
+  still read as zeros.
+* `-x`, `-g`: no starting image and no block-map files.
+
+The differences that change file content:
 
 * uid and gid keep all 32 bits (xgenext2fs keeps 16).
 * Device numbers of 256 and above use the new encoding.
-* A name longer than 255 bytes, an empty symlink target, a target of `bs`
+* A name longer than 255 bytes, an empty symlink target, a target of 4096
   bytes or more, or a hard link to a directory is an error. xgenext2fs writes
   a corrupt image instead.
 * The `:path` part of `-d`, `-a` and `-D` is honoured.
@@ -196,32 +204,29 @@ kext2 follows SPEC §13. The differences that change file content:
 * ctime and atime equal mtime.
 * Times outside the signed 32-bit range are clamped, and a malformed
   `SOURCE_DATE_EPOCH` is an error.
-* The automatic size is exact, so tiny trees work. Holes from `-z` do not
-  count toward the size.
+* lost+found is always created.
 * A device-table line of type `l`, or with out-of-range values, is skipped
   with a warning.
 
 The differences that do not change file content:
 
-* `-r N` sets the block count but not the inode count; `-r +N` adds N free blocks (SPEC Appendix C.1).
-* A `-b` value that is too small is an error that reports the minimum.
-* `-m`, `-e`, `-o`, `-U` and the numeric options are validated.
+* `-U` and the numeric options are validated.
 * `-q UID` works.
 * An unreadable file is an error, not a crash.
 * No corrupt image is left behind after a failure.
 * Standard input and standard output work without extra options.
-* On disk, kext2 sets `filetype` (except for Hurd), `sparse_super` and, when
-  needed, `large_file`. It also sets errors=continue and max mount count −1,
-  uses the allocation policy of SPEC §9 and sorts directory entries.
-* `-g` lists one entry for every logical block.
+* On disk, kext2 sets `filetype`, `sparse_super` and, when needed,
+  `large_file`. It also sets errors=continue and max mount count −1, uses
+  the allocation policy of SPEC §9 and sorts directory entries.
 * Huge directories and huge files take linear time.
 
 ## Comparison harness
 
 `compare/` runs kext2, mkext2 and xgenext2fs from the outside and inspects
 their images in a Docker container. The checks are `e2fsck -fn`, a read-only
-kernel mount, a full walk of the tree, and reproducibility. See
-[`compare/README.md`](compare/README.md).
+kernel mount, a full walk of the tree, and reproducibility. kext2 runs the
+cases without `-B` (its blocks are always 4 KiB) and skips the cases that use
+an option it does not have. See [`compare/README.md`](compare/README.md).
 
 ```bash
 docker build -t kext2-tools compare/docker   # once

@@ -1,23 +1,11 @@
-//! Reading a starting image (`-x`, SPEC §11.1).
+//! An ext2 image reader for the tests: walks the tree from the root inode
+//! and returns every entry with its content.
 
-use crate::error::{io_err, show, Error, Result};
-use crate::format::{decode_dev, get16, get32};
-use crate::runs::ZeroMapBuilder;
-use crate::tree::{Data, Kind, Node, NodeId, Reg, Tree, ROOT};
-use std::collections::HashMap;
+use super::E;
+use kext2::error::{io_err, show, Error, Result};
+use kext2::format::{decode_dev, get16, get32};
+use std::collections::{BTreeMap, HashMap};
 use std::fs::File;
-
-/// Parameters of the starting image used for the new one (R-X-3).
-#[derive(Debug, Clone)]
-pub struct ImageParams {
-    pub bs: u32,
-    pub blocks: u64,
-    pub inodes: u64,
-    pub reserved: u64,
-    pub label: [u8; 16],
-    pub creator_os: u32,
-    pub uuid: [u8; 16],
-}
 
 struct Img {
     f: File,
@@ -45,7 +33,7 @@ impl Img {
     fn read(&self, off: u64, buf: &mut [u8]) -> Result<()> {
         let mut done = 0;
         while done < buf.len() {
-            match crate::host::read_at(&self.f, &mut buf[done..], off + done as u64) {
+            match kext2::host::read_at(&self.f, &mut buf[done..], off + done as u64) {
                 Ok(0) => return Err(Error::fatal(format!("{}: truncated image", self.name))),
                 Ok(n) => done += n,
                 Err(e) if e.kind() == std::io::ErrorKind::Interrupted => {}
@@ -169,8 +157,8 @@ impl Img {
     }
 }
 
-/// Load the tree of a starting image into `tree` (its root becomes the root).
-pub fn load(tree: &mut Tree, path: &std::ffi::OsStr, holes: bool) -> Result<ImageParams> {
+/// Read every entry of the image at `path`, by path (`/a/b`).
+pub fn read(path: &std::ffi::OsStr) -> Result<BTreeMap<String, E>> {
     let name = path.to_string_lossy().into_owned();
     let f = File::open(path).map_err(|e| io_err(&name, e))?;
     let mut sb = [0u8; 1024];
@@ -180,24 +168,12 @@ pub fn load(tree: &mut Tree, path: &std::ffi::OsStr, holes: bool) -> Result<Imag
     if get16(&sb, 0x38) != 0xEF53 {
         return Err(bad("bad magic"));
     }
-    let rev = get32(&sb, 0x4C);
-    if rev > 1 {
-        return Err(bad("unsupported revision"));
-    }
     let log = get32(&sb, 0x18);
     if log > 2 {
         return Err(bad("unsupported block size"));
     }
     let bs = 1024u64 << log;
-    let inode_size = if rev == 0 { 128 } else { get16(&sb, 0x58) as u64 };
-    if inode_size < 128 || inode_size > bs || !inode_size.is_power_of_two() {
-        return Err(bad("bad inode size"));
-    }
-    let (compat, incompat, ro) =
-        if rev == 0 { (0, 0, 0) } else { (get32(&sb, 0x5C), get32(&sb, 0x60), get32(&sb, 0x64)) };
-    if compat & !0x0008 != 0 || incompat & !0x0002 != 0 || ro & !0x0003 != 0 {
-        return Err(bad("unsupported features"));
-    }
+    let inode_size = get16(&sb, 0x58) as u64;
     let blocks = get32(&sb, 0x04) as u64;
     let inodes = get32(&sb, 0x00) as u64;
     let fdb = get32(&sb, 0x14) as u64;
@@ -207,46 +183,20 @@ pub fn load(tree: &mut Tree, path: &std::ffi::OsStr, holes: bool) -> Result<Imag
         return Err(bad("bad geometry"));
     }
     let groups = (blocks - fdb).div_ceil(bpg);
-    if groups * ipg < inodes || inodes < 11 {
-        return Err(bad("bad inode count"));
-    }
     let mut gdt = vec![0u8; (groups * 32) as usize];
     tmp.read((fdb + 1) * bs, &mut gdt)?;
     let tables = (0..groups as usize).map(|g| get32(&gdt, g * 32 + 8) as u64).collect();
     let img = Img { f: tmp.f, name: name.clone(), bs, ipg, inode_size, inodes, blocks, tables };
-    let mut label = [0u8; 16];
-    label.copy_from_slice(&sb[0x78..0x88]);
-    let mut uuid = [0u8; 16];
-    uuid.copy_from_slice(&sb[0x68..0x78]);
-    let params = ImageParams {
-        bs: bs as u32,
-        blocks,
-        inodes,
-        reserved: get32(&sb, 0x08) as u64,
-        label,
-        creator_os: get32(&sb, 0x48),
-        uuid,
-    };
-    let src_file = img.f.try_clone().map_err(|e| io_err(&name, e))?;
-    let src = tree.add_source(src_file, name.clone());
 
-    // walk the tree from inode 2
     let root = img.inode(2)?;
     if root.mode & 0xF000 != 0x4000 {
         return Err(bad("root is not a directory"));
     }
-    {
-        let r = tree.node_mut(ROOT);
-        r.perm = root.mode & 0o7777;
-        r.uid = root.uid;
-        r.gid = root.gid;
-        r.implicit = false;
-    }
-    let mut seen: HashMap<u64, NodeId> = HashMap::new();
+    let mut out = BTreeMap::new();
     let mut dirs_seen: HashMap<u64, ()> = HashMap::new();
     dirs_seen.insert(2, ());
-    let mut stack: Vec<(u64, RawInode, NodeId)> = vec![(2, root, ROOT)];
-    while let Some((_dino, d, did)) = stack.pop() {
+    let mut stack: Vec<(String, RawInode)> = vec![(String::new(), root)];
+    while let Some((dpath, d)) = stack.pop() {
         let nblocks = d.size.div_ceil(bs);
         let map = img.block_map(&d, nblocks)?;
         let data = img.read_data(&map, nblocks * bs)?;
@@ -258,53 +208,43 @@ pub fn load(tree: &mut Tree, path: &std::ffi::OsStr, holes: bool) -> Result<Imag
             if rec < 8 || pos + rec > data.len() || 8 + nlen > rec {
                 return Err(bad("corrupt directory"));
             }
-            let nm = &data[pos + 8..pos + 8 + nlen];
+            let nm = data[pos + 8..pos + 8 + nlen].to_vec();
             pos += rec;
             if ino == 0 || nm == b"." || nm == b".." {
                 continue;
             }
-            if let Some(&existing) = seen.get(&ino) {
-                tree.link_child(did, nm, existing);
-                continue;
-            }
             let x = img.inode(ino)?;
-            if x.file_acl != 0 {
-                return Err(bad("extended attribute blocks are in use"));
-            }
-            let perm = x.mode & 0o7777;
-            let kind = match x.mode & 0xF000 {
+            let path = format!("{dpath}/{}", String::from_utf8_lossy(&nm));
+            let mut e = E {
+                kind: '?',
+                perm: x.mode & 0o7777,
+                uid: x.uid,
+                gid: x.gid,
+                mtime: x.mtime,
+                data: vec![],
+                target: vec![],
+                dev: (0, 0),
+                ino,
+                map: vec![],
+            };
+            match x.mode & 0xF000 {
                 0x4000 => {
                     if dirs_seen.insert(ino, ()).is_some() {
                         return Err(bad("directory hard link"));
                     }
-                    Kind::Dir(Box::default())
+                    e.kind = 'd';
+                    stack.push((path.clone(), x));
                 }
                 0x8000 => {
-                    let nb = x.size.div_ceil(bs);
-                    let map = img.block_map(&x, nb)?;
-                    let zmap = if holes {
-                        let mut z = ZeroMapBuilder::new(bs as u32);
-                        let mut buf = vec![0u8; bs as usize];
-                        for &(l, b, c) in &map {
-                            for k in 0..c {
-                                img.read((b + k) * bs, &mut buf)?;
-                                let lim = (x.size - (l + k) * bs).min(bs) as usize;
-                                z.feed((l + k) * bs, &buf[..lim]);
-                            }
-                        }
-                        Some(z.finish())
-                    } else {
-                        None
-                    };
-                    Kind::Reg(Box::new(Reg {
-                        size: x.size,
-                        data: Data::Image { src, bs: bs as u32, map: map.into() },
-                        zmap: zmap.map(Box::new),
-                    }))
+                    e.kind = 'f';
+                    e.map = img.block_map(&x, x.size.div_ceil(bs))?;
+                    if x.size <= super::MAX_LOADED {
+                        e.data = img.read_data(&e.map, x.size)?;
+                    }
                 }
                 0xA000 => {
-                    let fast = x.blocks512 == 0;
-                    let t = if fast {
+                    e.kind = 'l';
+                    e.target = if x.blocks512 == 0 {
                         let mut raw = Vec::with_capacity(60);
                         for v in &x.block {
                             raw.extend_from_slice(&v.to_le_bytes());
@@ -315,30 +255,17 @@ pub fn load(tree: &mut Tree, path: &std::ffi::OsStr, holes: bool) -> Result<Imag
                         let map = img.block_map(&x, 1)?;
                         img.read_data(&map, x.size.min(bs))?
                     };
-                    Kind::Symlink(t.into())
                 }
                 0x2000 | 0x6000 => {
-                    let (ma, mi) = decode_dev(x.block[0], x.block[1]);
-                    if x.mode & 0xF000 == 0x2000 {
-                        Kind::Chr(ma, mi)
-                    } else {
-                        Kind::Blk(ma, mi)
-                    }
+                    e.kind = if x.mode & 0xF000 == 0x2000 { 'c' } else { 'b' };
+                    e.dev = decode_dev(x.block[0], x.block[1]);
                 }
-                0x1000 => Kind::Fifo,
-                0xC000 => Kind::Sock,
-                _ => return Err(bad(&format!("unknown file type in inode {ino} ({})", show(nm)))),
-            };
-            let is_dir = kind.is_dir();
-            let node = Node::new(kind, perm, x.uid, x.gid, x.mtime);
-            let id = tree.push(node);
-            tree.link_child(did, nm, id);
-            if is_dir {
-                stack.push((ino, x, id));
-            } else {
-                seen.insert(ino, id);
+                0x1000 => e.kind = 'p',
+                0xC000 => e.kind = 's',
+                _ => return Err(bad(&format!("unknown file type in inode {ino} ({})", show(&nm)))),
             }
+            out.insert(path, e);
         }
     }
-    Ok(params)
+    Ok(out)
 }

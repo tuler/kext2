@@ -7,7 +7,7 @@ use common::*;
 use std::io::Write;
 use std::os::unix::fs::symlink;
 
-/// SPEC §7.4 worked example: 10 blocks, fixed block layout.
+/// A tiny tree: one group of 12 blocks, fixed block layout.
 #[test]
 fn worked_example() {
     let d = tmpdir();
@@ -20,32 +20,40 @@ fn worked_example() {
     let img = p(d.path(), "x.img");
     kext2(&["-f", "-d", s(&t), s(&img)]).unwrap();
     let b = std::fs::read(&img).unwrap();
-    assert_eq!(b.len(), 10 * 1024);
+    assert_eq!(b.len(), 12 * 4096);
     let sb = &b[1024..2048];
-    assert_eq!(u32_at(sb, 0x04), 10); // blocks
-    assert_eq!(u32_at(sb, 0x00), 16); // inodes
+    assert_eq!(u32_at(sb, 0x04), 12); // blocks
+    assert_eq!(u32_at(sb, 0x00), 32); // inodes
+    assert_eq!(u32_at(sb, 0x0C), 0); // free blocks
+    assert_eq!(u32_at(sb, 0x10), 17); // free inodes: geometry rounding only
+    assert_eq!(u32_at(sb, 0x14), 0); // first data block
+    assert_eq!(u32_at(sb, 0x18), 2); // 4 KiB blocks
     assert_eq!(u32_at(sb, 0x20), 16); // blocks per group
-    assert_eq!(u32_at(sb, 0x08), 0); // reserved: no lost+found
+    assert_eq!(u32_at(sb, 0x08), 0); // no reserved blocks
     assert_eq!(u16_at(sb, 0x38), 0xEF53);
     assert_eq!(u32_at(sb, 0x60), 2); // filetype
     assert_eq!(u32_at(sb, 0x64), 1); // sparse_super
-                                     // GDT at block 2: bitmaps at 3, 4, inode table at 5
-    let gd = &b[2048..2048 + 32];
-    assert_eq!((u32_at(gd, 0), u32_at(gd, 4), u32_at(gd, 8)), (3, 4, 5));
-    // root inode (2) data at block 7
-    let ino = |n: usize| &b[5 * 1024 + (n - 1) * 128..5 * 1024 + n * 128];
-    assert_eq!(u32_at(ino(2), 40), 7);
+
+    // GDT at block 1: bitmaps at 2, 3, inode table at 4
+    let gd = &b[4096..4096 + 32];
+    assert_eq!((u32_at(gd, 0), u32_at(gd, 4), u32_at(gd, 8)), (2, 3, 4));
+    let ino = |n: usize| &b[4 * 4096 + (n - 1) * 128..4 * 4096 + n * 128];
+    // root (inode 2) at block 5, lost+found (inode 11) at blocks 6-9
+    assert_eq!(u32_at(ino(2), 40), 5);
     assert_eq!(u16_at(ino(2), 0), 0o40755);
-    // a.txt is the first child placed (inode 11) at block 8; sub at block 9
+    assert_eq!(u16_at(ino(11), 0), 0o40700);
+    assert_eq!((u32_at(ino(11), 4), u32_at(ino(11), 28), u32_at(ino(11), 40)), (16384, 32, 6));
+    // a.txt is the first child placed (inode 12) at block 10; sub at block 11
     let m = read_image(&img);
     assert_eq!(m["/a.txt"].data, b"hello\n");
-    assert_eq!(m["/hard"].ino_group, m["/a.txt"].ino_group);
+    assert_eq!(m["/hard"].ino, m["/a.txt"].ino);
     assert_eq!(m["/link"].target, b"a.txt");
     assert_eq!(m["/fifo"].kind, 'p');
     assert_eq!(m["/sub"].kind, 'd');
-    assert_eq!(u32_at(ino(11), 40), 8);
-    assert_eq!(u16_at(ino(11), 26), 2); // two names
-    assert_eq!(u32_at(ino(14), 40), 9); // sub: last inode, last block
+    assert_eq!(m["/lost+found"].kind, 'd');
+    assert_eq!(u32_at(ino(12), 40), 10);
+    assert_eq!(u16_at(ino(12), 26), 2); // two names
+    assert_eq!(u32_at(ino(15), 40), 11); // sub: last inode, last block
 }
 
 fn sample_tar(fmt: Fmt) -> Vec<u8> {
@@ -79,10 +87,10 @@ fn tar_formats() {
             (f.data.as_slice(), f.perm, f.uid, f.gid, f.mtime),
             (&b"some data"[..], 0o4755, 1000, 100, 1_500_000_000)
         );
-        assert_eq!(m["/dir/hard"].ino_group, f.ino_group);
+        assert_eq!(m["/dir/hard"].ino, f.ino);
         assert_eq!((m["/sym"].target.as_slice(), m["/sym"].perm), (&b"../x/y"[..], 0o777));
         assert_eq!(m["/old"].mtime, -1000);
-        assert!(m.contains_key("/lost+found") || !m.contains_key("/lost+found"));
+        assert_eq!(m["/lost+found"].kind, 'd');
         if fmt != Fmt::V7 {
             assert_eq!((m["/null"].kind, m["/null"].dev), ('c', (1, 3)));
             assert_eq!((m["/sda1"].kind, m["/sda1"].dev), ('b', (8, 1)));
@@ -91,8 +99,8 @@ fn tar_formats() {
         // the './' entry set the root's mode and owner
         let b = std::fs::read(&img).unwrap();
         let sb = &b[1024..2048];
-        let it = u32_at(&b[2048..], 8) as usize;
-        let root = &b[it * 1024 + 128..it * 1024 + 256];
+        let it = u32_at(&b[4096..], 8) as usize;
+        let root = &b[it * 4096 + 128..it * 4096 + 256];
         assert_eq!(u16_at(root, 0), 0o40711);
         assert_eq!((u16_at(root, 2), u16_at(root, 24)), (5, 6));
         assert_eq!(u32_at(root, 16), u32_at(sb, 0x30)); // root time = T_fs
@@ -129,7 +137,7 @@ fn tar_extensions() {
     let tar = p(d.path(), "e.tar");
     std::fs::write(&tar, w.finish()).unwrap();
     let img = p(d.path(), "e.img");
-    kext2(&["-B", "4096", "-a", s(&tar), s(&img)]).unwrap();
+    kext2(&["-a", s(&tar), s(&img)]).unwrap();
     let m = read_image(&img);
     let long_path = format!("/{long}");
     assert_eq!(m[&long_path].data, b"long");
@@ -237,25 +245,14 @@ fn tar_sparse() {
     w.entry(H { name: b"GNUSparseFile.1/pax10", fmt: Fmt::Ustar, ..Default::default() }, &data);
     let tar = p(d.path(), "s.tar");
     std::fs::write(&tar, w.finish()).unwrap();
-    for z in [false, true] {
-        let img = p(d.path(), "s.img");
-        let mut a = vec!["-a", s(&tar)];
-        if z {
-            a.push("-z");
-        }
-        a.push(s(&img));
-        kext2(&a).unwrap();
-        let m = read_image(&img);
-        for n in ["/oldgnu", "/pax00", "/pax01", "/pax10"] {
-            expect(&m, n);
-        }
-        let len = std::fs::metadata(&img).unwrap().len();
-        if z {
-            assert!(len < 2 * 1024 * 1024, "holes: image is {len} bytes");
-        } else {
-            assert!(len > 4 * real);
-        }
+    let img = p(d.path(), "s.img");
+    kext2(&["-a", s(&tar), s(&img)]).unwrap();
+    let m = read_image(&img);
+    for n in ["/oldgnu", "/pax00", "/pax01", "/pax10"] {
+        expect(&m, n);
     }
+    // the data is stored dense
+    assert!(std::fs::metadata(&img).unwrap().len() > 4 * real);
 }
 
 #[test]
@@ -282,7 +279,7 @@ fn compressed_and_threads_identical() {
         let t = p(d.path(), &format!("in-{name}"));
         std::fs::write(&t, bytes).unwrap();
         let img = p(d.path(), &format!("o{i}.img"));
-        kext2_threads(&["-a", s(&t), "-b", "3000", s(&img)], Some(1 + i % 3)).unwrap();
+        kext2_threads(&["-a", s(&t), "--free-space", "10M", s(&img)], Some(1 + i % 3)).unwrap();
         images.push(std::fs::read(&img).unwrap());
     }
     for im in &images[1..] {
@@ -323,46 +320,62 @@ fn layering_first_wins_and_paths() {
     assert_eq!(m["/etc/extra"].data, b"only B");
     assert_eq!(m["/sub/dir/bin/sh"].data, b"tar sh");
     assert_eq!((m["/sub/dir"].perm, m["/sub/dir"].uid), (0o755, 0));
-    // the input file lost+found loses against the provisional directory,
-    // which is then dropped because this tiny image reserves no blocks
-    assert!(!m.contains_key("/lost+found"));
+    // the input file lost+found loses against the generated directory
+    assert_eq!((m["/lost+found"].kind, m["/lost+found"].perm), ('d', 0o700));
     assert_eq!((m["/sub/dev/tty0"].dev, m["/sub/dev/tty2"].dev), ((4, 1), (4, 3)));
     assert!(!m.contains_key("/sub/dev/tty3"));
     assert!(!m.contains_key("/missing"));
 }
 
+/// A file mapped through the triple-indirect block: more than 4 GiB, built
+/// from a sparse tar member so that the image stays sparse.
 #[test]
-fn holes_and_triple_indirect() {
+fn triple_indirect() {
     let d = tmpdir();
-    let t = p(d.path(), "t");
-    std::fs::create_dir_all(&t).unwrap();
-    let pp: u64 = 256;
+    let pp: u64 = 1024;
     let marks = [0, 11, 12, 12 + pp - 1, 12 + pp, 12 + pp + pp * pp - 1, 12 + pp + pp * pp, 12 + pp + pp * pp + 70000];
-    let size = (marks[marks.len() - 1] + 1) * 1024;
-    {
-        let f = std::fs::File::create(t.join("sparse")).unwrap();
-        f.set_len(size).unwrap();
-        use std::os::unix::fs::FileExt;
-        for &l in &marks {
-            f.write_all_at(&l.to_le_bytes(), l * 1024 + 100).unwrap();
-        }
-    }
-    std::fs::write(t.join("zeros"), vec![0u8; 50_000]).unwrap();
-    let img = p(d.path(), "h.img");
-    kext2(&["-z", "-m", "0", "-d", s(&t), s(&img)]).unwrap();
-    let len = std::fs::metadata(&img).unwrap().len();
-    assert!(len < 64 * 1024, "{len}");
-    let m = read_image(&img);
-    let data = &m["/sparse"].data;
-    assert_eq!(data.len() as u64, size);
+    let real = (marks[marks.len() - 1] + 1) * 4096;
+    let mut content = Vec::new();
+    let mut map = Vec::new();
     for &l in &marks {
-        assert_eq!(&data[(l * 1024 + 100) as usize..(l * 1024 + 108) as usize], &l.to_le_bytes());
+        content.extend_from_slice(&(l + 1).to_le_bytes());
+        map.push(format!("{},8", l * 4096 + 100));
     }
-    assert_eq!(
-        data.iter().filter(|&&b| b != 0).count(),
-        marks.iter().map(|l| l.to_le_bytes().iter().filter(|&&b| b != 0).count()).sum()
+    let map = map.join(",");
+    let mut w = TarW::new();
+    w.pax(
+        b'x',
+        &[
+            ("GNU.sparse.size", real.to_string().as_bytes()),
+            ("GNU.sparse.map", map.as_bytes()),
+            ("GNU.sparse.name", b"big"),
+        ],
     );
-    assert_eq!(m["/zeros"].data.len(), 50_000);
+    w.entry(H { name: b"GNUSparseFile.1/big", fmt: Fmt::Ustar, ..Default::default() }, &content);
+    let tar = p(d.path(), "t.tar");
+    std::fs::write(&tar, w.finish()).unwrap();
+    let img = p(d.path(), "h.img");
+    kext2(&["-a", s(&tar), s(&img)]).unwrap();
+    let m = read_image(&img);
+    let f = &m["/big"];
+    let nblocks = real / 4096;
+    assert_eq!(f.map.iter().map(|r| r.2).sum::<u64>(), nblocks);
+    let phys = |l: u64| {
+        let r = f.map.iter().find(|r| r.0 <= l && l < r.0 + r.2).unwrap();
+        r.1 + (l - r.0)
+    };
+    let file = std::fs::File::open(&img).unwrap();
+    use std::os::unix::fs::FileExt;
+    for &l in &marks {
+        let mut v = [0u8; 8];
+        file.read_exact_at(&mut v, phys(l) * 4096 + 100).unwrap();
+        assert_eq!(v, (l + 1).to_le_bytes(), "block {l}");
+    }
+    // the triple-indirect pointer is set
+    let b = std::fs::read(&img).map(|b| b[..1 << 20].to_vec()).unwrap();
+    let it = u32_at(&b[4096..], 8) as usize;
+    let off = it * 4096 + (f.ino as usize - 1) * 128;
+    assert_ne!(u32_at(&b[off..], 40 + 14 * 4), 0);
 }
 
 #[test]
@@ -379,20 +392,17 @@ fn lost_found_and_big_directory() {
     assert_eq!(m.keys().filter(|k| k.starts_with("/big/")).count(), 3000);
     assert_eq!(m["/big/entry-01234-xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx"].data, [(1234 % 256) as u8]);
     let lf = &m["/lost+found"];
-    assert_eq!((lf.kind, lf.perm, lf.ino_group), ('d', 0o700, lf.ino_group));
+    assert_eq!((lf.kind, lf.perm, lf.ino), ('d', 0o700, 11));
     let b = std::fs::read(&img).unwrap();
-    let it = u32_at(&b[2048..], 8) as usize;
-    let lfi = &b[it * 1024 + 10 * 128..it * 1024 + 11 * 128]; // inode 11
+    let it = u32_at(&b[4096..], 8) as usize;
+    let lfi = &b[it * 4096 + 10 * 128..it * 4096 + 11 * 128]; // inode 11
     assert_eq!(u16_at(lfi, 0), 0o40700);
-    assert_eq!(u32_at(lfi, 4), 16 * 1024);
-    assert_eq!(u32_at(lfi, 28), 17 * 2); // 16 data blocks + 1 indirect
-                                         // tiny tree: no lost+found
-    let t2 = p(d.path(), "t2");
-    std::fs::create_dir_all(&t2).unwrap();
-    std::fs::write(t2.join("f"), b"x").unwrap();
-    let img2 = p(d.path(), "s.img");
-    kext2(&["-d", s(&t2), s(&img2)]).unwrap();
-    assert!(!read_image(&img2).contains_key("/lost+found"));
+    assert_eq!(u32_at(lfi, 4), 4 * 4096);
+    assert_eq!(u32_at(lfi, 28), 4 * 8); // 4 data blocks, no indirect block
+
+    // the 3000 entries take several blocks
+    let big = &b[it * 4096 + (m["/big"].ino as usize - 1) * 128..];
+    assert!(u32_at(big, 4) > 4096);
 }
 
 #[test]
@@ -402,24 +412,20 @@ fn errors_leave_no_output() {
     std::fs::create_dir_all(&t).unwrap();
     std::fs::write(t.join("f"), vec![7u8; 100_000]).unwrap();
     let img = p(d.path(), "e.img");
-    let e = kext2(&["-b", "50", "-d", s(&t), s(&img)]).unwrap_err();
-    assert!(e.starts_with("image too small: 50 blocks requested, at least "), "{e}");
-    let min: u64 = e.split("at least ").nth(1).unwrap().split(' ').next().unwrap().parse().unwrap();
-    assert!(!img.exists());
-    kext2(&["-b", &min.to_string(), "-d", s(&t), s(&img)]).unwrap();
-    assert_eq!(std::fs::metadata(&img).unwrap().len(), min * 1024);
-    assert!(kext2(&["-b", &(min - 1).to_string(), "-d", s(&t), s(&img)]).is_err());
-    // the earlier image is untouched by the failed run
-    assert_eq!(std::fs::metadata(&img).unwrap().len(), min * 1024);
+    kext2(&["-d", s(&t), s(&img)]).unwrap();
+    let good = std::fs::read(&img).unwrap();
     let mut w = TarW::new();
     w.entry(H { name: b"l", typeflag: b'2', link: &[b'x'; 100], ..Default::default() }, b"");
-    w.gnu_long(b'K', &[b'y'; 1024]);
+    w.gnu_long(b'K', &[b'y'; 4096]);
     w.entry(H { name: b"l2", typeflag: b'2', ..Default::default() }, b"");
     let tar = p(d.path(), "bad.tar");
     std::fs::write(&tar, w.finish()).unwrap();
     let img2 = p(d.path(), "e2.img");
-    assert!(kext2(&["-a", s(&tar), s(&img2)]).unwrap_err().contains("symlink target length 1024"));
+    assert!(kext2(&["-a", s(&tar), s(&img2)]).unwrap_err().contains("symlink target length 4096"));
     assert!(!img2.exists());
+    // a failed run leaves an earlier image untouched
+    assert!(kext2(&["-d", s(&t), "-a", s(&tar), s(&img)]).is_err());
+    assert!(std::fs::read(&img).unwrap() == good);
     assert_eq!(
         std::fs::read_dir(d.path())
             .unwrap()
@@ -461,36 +467,35 @@ fn reproducible_across_input_order() {
     assert!(std::fs::read(&ia).unwrap() == std::fs::read(&ib).unwrap());
 }
 
-/// SPEC Appendix C.1: `-r +N` adds N free blocks to the automatic size,
-/// `-r N` means exactly N blocks, and `-b` wins over either form.
+/// `--free-space` adds whole free blocks and one free inode per 16 KiB.
 #[test]
-fn readjustment_forms() {
+fn free_space() {
     let d = tmpdir();
     let t = p(d.path(), "t");
     std::fs::create_dir_all(&t).unwrap();
     std::fs::write(t.join("f"), vec![1u8; 50_000]).unwrap();
     let img = p(d.path(), "r.img");
-    let blocks = |a: &[&str]| -> u64 {
-        let mut v = vec!["-f", "-m", "0"];
+    // (blocks, free blocks, free inodes)
+    let build = |a: &[&str]| -> (u64, u64, u64) {
+        let mut v = vec!["-f"];
         v.extend_from_slice(a);
         v.extend_from_slice(&["-d", s(&t), s(&img)]);
         kext2(&v).unwrap();
-        std::fs::metadata(&img).unwrap().len() / 1024
-    };
-    let free = |_: ()| -> u64 {
         let b = std::fs::read(&img).unwrap();
-        u32_at(&b[1024..2048], 0x0C) as u64
+        assert_eq!(b.len() as u64, u32_at(&b[1024..2048], 0x04) as u64 * 4096);
+        let sb = &b[1024..2048];
+        (u32_at(sb, 0x04) as u64, u32_at(sb, 0x0C) as u64, u32_at(sb, 0x10) as u64)
     };
-    let auto = blocks(&[]);
-    assert_eq!(free(()), 0);
-    let plus = blocks(&["-r", "+1000"]);
-    assert!(free(()) >= 1000, "free {}", free(()));
-    assert!(plus >= auto + 1000 && plus <= auto + 1010, "{auto} {plus}");
-    assert_eq!(blocks(&["-r", "+0"]), auto);
-    assert_eq!(blocks(&["-r", "40000"]), 40000);
-    assert_eq!(blocks(&["-r", "40000", "-b", "30000"]), 30000);
-    assert_eq!(blocks(&["-b", "30000", "-r", "+7"]), 30000);
-    let e = kext2(&["-f", "-r", "10", "-d", s(&t), s(&img)]).unwrap_err();
-    assert!(e.starts_with("image too small: 10 blocks requested"), "{e}");
-    assert!(kext2(&["-f", "-r", "-5", "-d", s(&t), s(&img)]).is_err());
+    let (auto, free, _) = build(&[]);
+    assert_eq!(free, 0);
+    assert_eq!(build(&["--free-space", "0"]).0, auto);
+    let (b1, free, inodes) = build(&["--free-space", "1"]);
+    assert!(b1 > auto && free >= 1 && inodes >= 1);
+    let (b4, free, inodes) = build(&["--free-space", "4M"]);
+    assert!((1024..1024 + 8).contains(&free), "free {free}");
+    assert!(inodes >= 256, "free inodes {inodes}");
+    // 1024 free blocks and 8 more inode-table blocks for the 256 inodes
+    assert!(b4 >= auto + 1024 + 8 && b4 <= auto + 1024 + 16, "{auto} {b4}");
+    let (b5, free, _) = build(&["--free-space", "4194305"]);
+    assert_eq!((b5 - b4, free), (1, 1025));
 }

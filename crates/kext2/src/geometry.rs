@@ -1,7 +1,16 @@
 //! Block-group geometry and image sizing (SPEC §7.3, §7.4).
+//!
+//! The block size is always 4 KiB, so block 0 holds the superblock (at byte
+//! 1024) and `s_first_data_block` is 0.
 
 use crate::error::{Error, Result};
 
+/// The block size.
+pub const BS: u32 = 4096;
+/// Inodes per inode-table block.
+pub const IPB: u64 = BS as u64 / 128;
+/// Largest number of blocks (or inodes) in a group: one bitmap block's bits.
+pub const MAX_PER_GROUP: u64 = 8 * BS as u64;
 pub const MAX_BLOCKS: u64 = u32::MAX as u64;
 
 /// True if group `g` holds a superblock backup (sparse_super, R-GEO-1).
@@ -42,9 +51,6 @@ pub fn count_super(n: u64) -> u64 {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Geometry {
-    pub bs: u32,
-    /// `s_first_data_block`.
-    pub fdb: u64,
     /// Total blocks `B`.
     pub blocks: u64,
     /// Number of groups `G`.
@@ -74,29 +80,26 @@ fn roundup(a: u64, k: u64) -> u64 {
 }
 
 /// GEOMETRY(B, I) of R-GEO-2.
-pub fn geometry(bs: u32, blocks: u64, inodes: u64) -> Geo {
-    let bsz = bs as u64;
-    let fdb = if bs == 1024 { 1 } else { 0 };
-    let ipb = bsz / 128;
-    if blocks <= fdb {
+pub fn geometry(blocks: u64, inodes: u64) -> Geo {
+    let n = blocks;
+    if n == 0 {
         return Geo::Invalid { capacity: 0 };
     }
-    let n = blocks - fdb;
-    let gmin = ceil(inodes, 8 * bsz).max(1);
-    let mut bpg = (8 * bsz).min(roundup(ceil(n, gmin), 8));
-    let ipg_of = |bpg: u64| roundup(ceil(inodes, ceil(n, bpg)), ipb).max(16);
+    let gmin = ceil(inodes, MAX_PER_GROUP).max(1);
+    let mut bpg = MAX_PER_GROUP.min(roundup(ceil(n, gmin), 8));
+    let ipg_of = |bpg: u64| roundup(ceil(inodes, ceil(n, bpg)), IPB).max(16);
     // Iterations with ipg > 8·bs only lower bpg: jump to the largest bpg of
     // the sequence bpg, bpg−8, … with ipg ≤ 8·bs (ipg grows with bpg).
-    if bpg >= 8 && ipg_of(bpg) > 8 * bsz {
+    if bpg >= 8 && ipg_of(bpg) > MAX_PER_GROUP {
         let (mut lo, mut hi) = (0u64, (bpg - 8) / 8 + 1); // k in [lo, hi): bpg − 8k
-        if ipg_of(bpg - 8 * (hi - 1)) > 8 * bsz {
+        if ipg_of(bpg - 8 * (hi - 1)) > MAX_PER_GROUP {
             bpg -= 8 * (hi - 1);
         } else {
             // invariant: ipg(bpg − 8·lo) > 8bs, ipg(bpg − 8·(hi−1)) ≤ 8bs
             hi -= 1;
             while hi - lo > 1 {
                 let mid = (lo + hi) / 2;
-                if ipg_of(bpg - 8 * mid) > 8 * bsz {
+                if ipg_of(bpg - 8 * mid) > MAX_PER_GROUP {
                     lo = mid;
                 } else {
                     hi = mid;
@@ -108,13 +111,13 @@ pub fn geometry(bs: u32, blocks: u64, inodes: u64) -> Geo {
     let mut cap: i128 = 0;
     while bpg >= 8 {
         let g = ceil(n, bpg);
-        let ipg = roundup(ceil(inodes, g), ipb).max(16);
-        let itb = ipg / ipb;
-        let gdb = ceil(g * 32, bsz);
+        let ipg = roundup(ceil(inodes, g), IPB).max(16);
+        let itb = ipg / IPB;
+        let gdb = ceil(g * 32, BS as u64);
         let nsuper = count_super(g);
         let overhead = g as i128 * (2 + itb) as i128 + nsuper as i128 * (1 + gdb) as i128;
         cap = n as i128 - overhead;
-        if ipg <= 8 * bsz {
+        if ipg <= MAX_PER_GROUP {
             if bpg <= itb + 3 || cap <= 0 {
                 return Geo::Invalid { capacity: cap };
             }
@@ -125,7 +128,7 @@ pub fn geometry(bs: u32, blocks: u64, inodes: u64) -> Geo {
             // every group but the last has bpg blocks; group 0 has a superblock
             let others_ok = g == 1 || bpg > ov_super;
             if others_ok && last > ov_last {
-                return Geo::Valid(Geometry { bs, fdb, blocks, groups: g, bpg, ipg, itb, gdb, capacity: cap as u64 });
+                return Geo::Valid(Geometry { blocks, groups: g, bpg, ipg, itb, gdb, capacity: cap as u64 });
             }
         }
         bpg -= 8;
@@ -137,31 +140,29 @@ pub fn geometry(bs: u32, blocks: u64, inodes: u64) -> Geo {
 /// superblock, a group-descriptor table for all groups, two bitmaps and its
 /// inode table in at most `8·bs` blocks; more groups mean a larger
 /// descriptor table, fewer mean larger inode tables.
-pub fn inodes_feasible(bs: u32, inodes: u64) -> bool {
-    let bsz = bs as u64;
-    let ipb = bsz / 128;
+pub fn inodes_feasible(inodes: u64) -> bool {
+    let bsz = BS as u64;
     if inodes > u32::MAX as u64 {
         return false;
     }
-    let gmin = ceil(inodes, 8 * bsz).max(1);
-    let ov = |g: u64| 3 + ceil(g * 32, bsz) + roundup(ceil(inodes, g), ipb).max(16) / ipb;
-    if ov(gmin) < 8 * bsz {
+    let gmin = ceil(inodes, MAX_PER_GROUP).max(1);
+    let ov = |g: u64| 3 + ceil(g * 32, bsz) + roundup(ceil(inodes, g), IPB).max(16) / IPB;
+    if ov(gmin) < MAX_PER_GROUP {
         return true;
     }
     // beyond bs²/4 groups the descriptor table alone fills a group
     let gmax = bsz * bsz / 4;
-    (gmin..=gmax).any(|g| roundup(ceil(inodes, g), ipb) <= 8 * bsz && ov(g) < 8 * bsz)
+    (gmin..=gmax).any(|g| roundup(ceil(inodes, g), IPB) <= MAX_PER_GROUP && ov(g) < MAX_PER_GROUP)
 }
 
-/// SIZE(D, F, I) of R-SIZE-3.
-pub fn size(bs: u32, d: u64, f: u64, inodes: u64) -> Result<u64> {
-    if !inodes_feasible(bs, inodes) {
-        return Err(Error::fatal(format!("too many inodes ({inodes}) for {bs}-byte blocks")));
+/// SIZE(D, F, I) of R-SIZE-3: the smallest block count whose geometry holds
+/// `d` blocks of content and `f` free blocks with `inodes` inodes.
+pub fn size(d: u64, f: u64, inodes: u64) -> Result<u64> {
+    if !inodes_feasible(inodes) {
+        return Err(Error::fatal(format!("too many inodes ({inodes})")));
     }
-    let fdb = if bs == 1024 { 1 } else { 0 };
-    let ipb = bs as u64 / 128;
     let need = d as u128 + f as u128;
-    let mut b: u128 = fdb as u128 + need + 4 + ceil(inodes, ipb) as u128;
+    let mut b: u128 = need + 4 + ceil(inodes, IPB) as u128;
     let mut rounds = 0u64;
     loop {
         if b > MAX_BLOCKS as u128 {
@@ -170,13 +171,11 @@ pub fn size(bs: u32, d: u64, f: u64, inodes: u64) -> Result<u64> {
         rounds += 1;
         // The search adds one block at a time while the geometry is invalid
         // but has capacity; with hundreds of millions of inodes it would
-        // need billions of rounds. Give up then (use -b or larger blocks).
+        // need billions of rounds. Give up then.
         if rounds > 1_000_000 {
-            return Err(Error::fatal(format!(
-                "no geometry found for {inodes} inodes (too many inodes; give -b, or use larger blocks)"
-            )));
+            return Err(Error::fatal(format!("no geometry found for {inodes} inodes (too many inodes)")));
         }
-        let (ok, cap) = match geometry(bs, b as u64, inodes) {
+        let (ok, cap) = match geometry(b as u64, inodes) {
             Geo::Valid(g) => (true, g.capacity as i128),
             Geo::Invalid { capacity } => (false, capacity),
         };
@@ -194,14 +193,14 @@ impl Geometry {
     }
     /// First block of group `g`.
     pub fn start(&self, g: u64) -> u64 {
-        self.fdb + g * self.bpg
+        g * self.bpg
     }
     /// Blocks in group `g`.
     pub fn size(&self, g: u64) -> u64 {
         if g + 1 < self.groups {
             self.bpg
         } else {
-            self.blocks - self.fdb - (self.groups - 1) * self.bpg
+            self.blocks - (self.groups - 1) * self.bpg
         }
     }
     /// Metadata blocks at the start of group `g`.
@@ -228,9 +227,6 @@ impl Geometry {
     }
     pub fn inodes_count(&self) -> u64 {
         self.groups * self.ipg
-    }
-    pub fn ipb(&self) -> u64 {
-        self.bs as u64 / 128
     }
 }
 
@@ -297,14 +293,15 @@ mod tests {
 
     #[test]
     fn worked_example() {
-        // SPEC §7.4: SIZE(3, 0, 14) with 1 KiB blocks = 10
-        assert_eq!(size(1024, 3, 0, 14).unwrap(), 10);
-        match geometry(1024, 10, 14) {
+        // SIZE(3, 0, 14) = 8: one group of 8 blocks (superblock, descriptors,
+        // two bitmaps, one inode-table block, 3 data blocks)
+        assert_eq!(size(3, 0, 14).unwrap(), 8);
+        match geometry(8, 14) {
             Geo::Valid(g) => {
-                assert_eq!((g.groups, g.bpg, g.ipg, g.itb, g.gdb, g.capacity), (1, 16, 16, 2, 1, 3));
+                assert_eq!((g.groups, g.bpg, g.ipg, g.itb, g.gdb, g.capacity), (1, 8, 32, 1, 1, 3));
                 assert_eq!(g.first_data_index(0), 0);
                 let m = DataMap::new(&g);
-                assert_eq!(m.block(0), 7);
+                assert_eq!(m.block(0), 5);
             }
             _ => panic!(),
         }
@@ -312,45 +309,40 @@ mod tests {
 
     #[test]
     fn invariants() {
-        for bs in [1024u32, 2048, 4096] {
-            for b in (1..20000u64).step_by(37).chain([8193, 8194, 8195, 16385, 16386, 24577, 3 * 8192 + 1]) {
-                for inodes in [11u64, 100, 2000, 30000] {
-                    if let Geo::Valid(g) = geometry(bs, b, inodes) {
-                        let bsz = bs as u64;
-                        assert!(g.bpg % 8 == 0 && g.bpg <= 8 * bsz);
-                        assert!(g.ipg % 8 == 0 && g.ipg >= 16 && g.ipg <= 8 * bsz && g.ipg % (bsz / 128) == 0);
-                        assert!(g.bpg > g.itb + 3);
-                        assert!(g.groups * g.ipg >= inodes);
-                        assert_eq!(g.groups, (b - g.fdb).div_ceil(g.bpg));
-                        let mut cap = 0;
-                        for gr in 0..g.groups {
-                            assert!(g.size(gr) > g.overhead(gr));
-                            assert_eq!(g.first_data_index(gr), cap);
-                            cap += g.data_blocks(gr);
-                        }
-                        assert_eq!(cap, g.capacity);
+        for b in (1..80000u64).step_by(37).chain([32769, 32770, 32771, 65537, 65538, 98305, 3 * 32768 + 1]) {
+            for inodes in [11u64, 100, 2000, 30000, 70000] {
+                if let Geo::Valid(g) = geometry(b, inodes) {
+                    assert!(g.bpg % 8 == 0 && g.bpg <= MAX_PER_GROUP);
+                    assert!(g.ipg % 8 == 0 && g.ipg >= 16 && g.ipg <= MAX_PER_GROUP && g.ipg % IPB == 0);
+                    assert!(g.bpg > g.itb + 3);
+                    assert!(g.groups * g.ipg >= inodes);
+                    assert_eq!(g.groups, b.div_ceil(g.bpg));
+                    let mut cap = 0;
+                    for gr in 0..g.groups {
+                        assert!(g.size(gr) > g.overhead(gr));
+                        assert_eq!(g.first_data_index(gr), cap);
+                        cap += g.data_blocks(gr);
                     }
+                    assert_eq!(cap, g.capacity);
                 }
             }
         }
     }
 
     /// GEOMETRY exactly as written in R-GEO-2 (no shortcuts).
-    fn geometry_ref(bs: u32, blocks: u64, inodes: u64) -> Geo {
-        let bsz = bs as u64;
-        let fdb = if bs == 1024 { 1 } else { 0 };
-        let ipb = bsz / 128;
-        if blocks <= fdb {
+    fn geometry_ref(blocks: u64, inodes: u64) -> Geo {
+        let bsz = BS as u64;
+        if blocks == 0 {
             return Geo::Invalid { capacity: 0 };
         }
-        let n = blocks - fdb;
+        let n = blocks;
         let gmin = ceil(inodes, 8 * bsz).max(1);
         let mut bpg = (8 * bsz).min(roundup(ceil(n, gmin), 8));
         let mut cap: i128 = 0;
         while bpg >= 8 {
             let g = ceil(n, bpg);
-            let ipg = roundup(ceil(inodes, g), ipb).max(16);
-            let itb = ipg / ipb;
+            let ipg = roundup(ceil(inodes, g), IPB).max(16);
+            let itb = ipg / IPB;
             let gdb = ceil(g * 32, bsz);
             let ov = |x: u64| (if has_super(x) { 1 + gdb } else { 0 }) + 2 + itb;
             let size = |x: u64| if x + 1 < g { bpg } else { n - (g - 1) * bpg };
@@ -360,17 +352,7 @@ mod tests {
                     return Geo::Invalid { capacity: cap };
                 }
                 if (0..g).all(|x| size(x) > ov(x)) {
-                    return Geo::Valid(Geometry {
-                        bs,
-                        fdb,
-                        blocks,
-                        groups: g,
-                        bpg,
-                        ipg,
-                        itb,
-                        gdb,
-                        capacity: cap as u64,
-                    });
+                    return Geo::Valid(Geometry { blocks, groups: g, bpg, ipg, itb, gdb, capacity: cap as u64 });
                 }
             }
             bpg -= 8;
@@ -380,32 +362,28 @@ mod tests {
 
     #[test]
     fn matches_reference() {
-        for bs in [1024u32, 2048, 4096] {
-            for b in (2..40000u64).step_by(97).chain([8193, 8200, 16386, 24577, 65537, 200_001]) {
-                for i in [11u64, 64, 1000, 9000, 20012, 40000, 70000, 150_000, 400_000] {
-                    assert_eq!(geometry(bs, b, i), geometry_ref(bs, b, i), "bs={bs} b={b} i={i}");
-                }
+        for b in (2..160000u64).step_by(389).chain([32769, 32800, 65538, 98305, 262145, 800_001]) {
+            for i in [11u64, 64, 1000, 9000, 40000, 70000, 150_000, 400_000, 1_600_000] {
+                assert_eq!(geometry(b, i), geometry_ref(b, i), "b={b} i={i}");
             }
         }
     }
 
     #[test]
     fn infeasible_inodes() {
-        assert!(inodes_feasible(1024, 100_000));
-        assert!(!inodes_feasible(1024, 4_000_000_000));
-        assert!(size(1024, 1, 0, 4_000_000_000).is_err());
+        assert!(inodes_feasible(100_000));
+        assert!(!inodes_feasible(u32::MAX as u64 + 1));
+        assert!(size(1, 0, 5_000_000_000).is_err());
     }
 
     #[test]
     fn size_is_valid() {
-        for bs in [1024u32, 2048, 4096] {
-            for d in [1u64, 5, 100, 8000, 9000, 70000] {
-                for i in [11u64, 500, 20012] {
-                    let b = size(bs, d, 0, i).unwrap();
-                    match geometry(bs, b, i) {
-                        Geo::Valid(g) => assert!(g.capacity >= d),
-                        _ => panic!(),
-                    }
+        for d in [1u64, 5, 100, 32000, 33000, 280000] {
+            for i in [11u64, 500, 40012] {
+                let b = size(d, 0, i).unwrap();
+                match geometry(b, i) {
+                    Geo::Valid(g) => assert!(g.capacity >= d),
+                    _ => panic!(),
                 }
             }
         }
@@ -413,7 +391,7 @@ mod tests {
 
     #[test]
     fn data_map_runs() {
-        let g = match geometry(1024, 30000, 100) {
+        let g = match geometry(100_000, 100) {
             Geo::Valid(g) => g,
             _ => panic!(),
         };

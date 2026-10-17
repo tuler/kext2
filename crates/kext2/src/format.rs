@@ -32,20 +32,17 @@ pub fn get32(b: &[u8], off: usize) -> u32 {
 pub struct Super {
     pub inodes_count: u32,
     pub blocks_count: u32,
-    pub r_blocks_count: u32,
     pub free_blocks_count: u32,
     pub free_inodes_count: u32,
-    pub first_data_block: u32,
-    pub log_block_size: u32,
     pub blocks_per_group: u32,
     pub inodes_per_group: u32,
     pub wtime: u32,
-    pub creator_os: u32,
-    pub feature_incompat: u32,
     pub feature_ro_compat: u32,
     pub volume_name: [u8; 16],
-    pub uuid: [u8; 16],
 }
+
+/// `s_log_block_size` for 4 KiB blocks.
+const LOG_BLOCK_SIZE: u32 = 2;
 
 impl Super {
     /// Serialise as the 1024-byte superblock of group `group_nr`.
@@ -53,12 +50,12 @@ impl Super {
         let mut b = [0u8; 1024];
         put32(&mut b, 0x00, self.inodes_count);
         put32(&mut b, 0x04, self.blocks_count);
-        put32(&mut b, 0x08, self.r_blocks_count);
+        put32(&mut b, 0x08, 0); // s_r_blocks_count: no reserved blocks
         put32(&mut b, 0x0C, self.free_blocks_count);
         put32(&mut b, 0x10, self.free_inodes_count);
-        put32(&mut b, 0x14, self.first_data_block);
-        put32(&mut b, 0x18, self.log_block_size);
-        put32(&mut b, 0x1C, self.log_block_size);
+        put32(&mut b, 0x14, 0); // s_first_data_block
+        put32(&mut b, 0x18, LOG_BLOCK_SIZE);
+        put32(&mut b, 0x1C, LOG_BLOCK_SIZE);
         put32(&mut b, 0x20, self.blocks_per_group);
         put32(&mut b, 0x24, self.blocks_per_group);
         put32(&mut b, 0x28, self.inodes_per_group);
@@ -72,7 +69,7 @@ impl Super {
         put16(&mut b, 0x3E, 0); // minor rev
         put32(&mut b, 0x40, self.wtime); // s_lastcheck
         put32(&mut b, 0x44, 0); // s_checkinterval
-        put32(&mut b, 0x48, self.creator_os);
+        put32(&mut b, 0x48, 0); // s_creator_os = Linux
         put32(&mut b, 0x4C, 1); // EXT2_DYNAMIC_REV
         put16(&mut b, 0x50, 0);
         put16(&mut b, 0x52, 0);
@@ -80,9 +77,9 @@ impl Super {
         put16(&mut b, 0x58, INODE_SIZE as u16);
         put16(&mut b, 0x5A, group_nr);
         put32(&mut b, 0x5C, 0);
-        put32(&mut b, 0x60, self.feature_incompat);
+        put32(&mut b, 0x60, FEATURE_INCOMPAT_FILETYPE);
         put32(&mut b, 0x64, self.feature_ro_compat);
-        b[0x68..0x78].copy_from_slice(&self.uuid);
+        // s_uuid (0x68..0x78) stays zero: images are reproducible
         b[0x78..0x88].copy_from_slice(&self.volume_name);
         b
     }
