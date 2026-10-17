@@ -4,7 +4,6 @@ use crate::error::{io_err, show, Error, Result};
 use crate::plan::Plan;
 use crate::tree::{Kind, NodeId, Tree, ROOT};
 use std::io::Write;
-use std::os::unix::ffi::OsStringExt;
 
 /// Resolve an image path from the root: `.` and empty components ignored,
 /// `..` goes to the parent, symlinks are not followed.
@@ -88,7 +87,7 @@ pub fn write_all(tree: &Tree, plan: &Plan, paths: &[Vec<u8>]) -> Result<()> {
             resolve(tree, plan, p).ok_or_else(|| Error::fatal(format!("path {} not found in filesystem", show(p))))?;
         let mut fname: Vec<u8> = p.iter().map(|&b| if b == b'/' { b'_' } else { b }).collect();
         fname.extend_from_slice(b".blk");
-        let fname = std::ffi::OsString::from_vec(fname);
+        let fname = crate::host::os_string(fname);
         let f = std::fs::File::create(&fname).map_err(|e| io_err(fname.to_string_lossy(), e))?;
         let mut w = std::io::BufWriter::new(f);
         render(tree, plan, id, &mut w).and_then(|_| w.flush()).map_err(|e| io_err(fname.to_string_lossy(), e))?;

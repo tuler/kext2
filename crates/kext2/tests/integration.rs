@@ -1,3 +1,6 @@
+// These tests use Unix file APIs and every decompressor.
+#![cfg(all(unix, feature = "gzip", feature = "bzip2", feature = "xz", feature = "zstd"))]
+
 mod common;
 
 use common::*;

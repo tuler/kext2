@@ -14,6 +14,7 @@ pub mod dirent;
 pub mod error;
 pub mod format;
 pub mod geometry;
+pub mod host;
 pub mod image;
 pub mod input;
 pub mod layout;
@@ -26,7 +27,6 @@ use cli::{Action, LayerKind, Options, Readjust, TimeMode};
 use error::{info, warn, Error, Result};
 use input::Ctx;
 use std::ffi::OsString;
-use std::os::unix::fs::MetadataExt;
 use tree::{Node, Tree, ROOT};
 
 /// Filesystem time `T_fs` (R-TIME-1).
@@ -36,7 +36,7 @@ pub fn filesystem_time(time: TimeMode, sde: Option<OsString>) -> Result<i64> {
         TimeMode::Fixed(s) | TimeMode::Clamp(s) => Ok(s),
         TimeMode::Default => {
             if let Some(v) = sde.filter(|v| !v.is_empty()) {
-                let b = std::os::unix::ffi::OsStrExt::as_bytes(v.as_os_str()).to_vec();
+                let b = host::os_bytes(&v);
                 return cli::parse_num('S', &b, 0, i32::MAX as u64)
                     .map(|v| v as i64)
                     .map_err(|_| Error::fatal(format!("invalid SOURCE_DATE_EPOCH '{}'", String::from_utf8_lossy(&b))));
@@ -49,21 +49,33 @@ pub fn filesystem_time(time: TimeMode, sde: Option<OsString>) -> Result<i64> {
 }
 
 fn file_id(p: &std::ffi::OsStr) -> Option<(u64, u64)> {
-    std::fs::metadata(p).ok().map(|m| (m.dev(), m.ino()))
+    std::fs::metadata(p).ok().and_then(|m| host::file_id(&m))
+}
+
+/// Summary of a built image.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Summary {
+    pub block_size: u32,
+    pub blocks: u64,
+    pub free_blocks: u64,
+    pub reserved_blocks: u64,
+    pub inodes: u64,
+    pub free_inodes: u64,
+    pub groups: u64,
 }
 
 /// Build the image described by `o`. `sde` is the value of `SOURCE_DATE_EPOCH`.
-pub fn build(o: &Options, sde: Option<OsString>) -> Result<()> {
+pub fn build(o: &Options, sde: Option<OsString>) -> Result<Summary> {
     build_with(o, sde, None)
 }
 
 /// [`build`] with an explicit number of writer threads (`None`: automatic).
-pub fn build_with(o: &Options, sde: Option<OsString>, threads: Option<usize>) -> Result<()> {
+pub fn build_with(o: &Options, sde: Option<OsString>, threads: Option<usize>) -> Result<Summary> {
     let t_fs = filesystem_time(o.time, sde)?;
     let t0 = std::time::Instant::now();
     let out_is_stdout = o.image == "-";
     let out_md = if out_is_stdout { None } else { std::fs::metadata(&o.image).ok() };
-    let output_id = out_md.as_ref().map(|m| (m.dev(), m.ino()));
+    let output_id = out_md.as_ref().and_then(host::file_id);
     let out_regular = out_md.as_ref().map(|m| m.is_file()).unwrap_or(!out_is_stdout);
 
     let mut tree = Tree::new(t_fs);
@@ -184,6 +196,16 @@ pub fn build_with(o: &Options, sde: Option<OsString>, threads: Option<usize>) ->
     if o.verbose {
         describe(&r);
     }
+    let sb = r.superblock();
+    let summary = Summary {
+        block_size: plan.geo.bs,
+        blocks: plan.geo.blocks,
+        free_blocks: sb.free_blocks_count as u64,
+        reserved_blocks: plan.reserved,
+        inodes: plan.geo.inodes_count(),
+        free_inodes: sb.free_inodes_count as u64,
+        groups: plan.geo.groups,
+    };
     match threads {
         Some(t) => write::write_image_threads(&r, &o.image, t)?,
         None => write::write_image(&r, &o.image)?,
@@ -191,41 +213,41 @@ pub fn build_with(o: &Options, sde: Option<OsString>, threads: Option<usize>) ->
     blockmap::write_all(&tree, &plan, &o.block_maps)?;
     if o.verbose {
         let t_write = t0.elapsed();
-        eprintln!(
-            "kext2: {} nodes; scan {:.3} s, plan {:.3} s, write {:.3} s",
+        info(format!(
+            "{} nodes; scan {:.3} s, plan {:.3} s, write {:.3} s",
             tree.nodes.len(),
             t_scan.as_secs_f64(),
             (t_plan - t_scan).as_secs_f64(),
             (t_write - t_plan).as_secs_f64()
-        );
+        ));
     }
-    Ok(())
+    Ok(summary)
 }
 
 fn describe(r: &write::Renderer) {
     let p = r.plan;
     let g = &p.geo;
     let sb = r.superblock();
-    eprintln!("kext2: block size {}, {} blocks, {} groups of {} blocks", g.bs, g.blocks, g.groups, g.bpg);
-    eprintln!(
-        "kext2: {} inodes ({} per group, {} inode-table blocks per group), {} used",
+    info(format!("block size {}, {} blocks, {} groups of {} blocks", g.bs, g.blocks, g.groups, g.bpg));
+    info(format!(
+        "{} inodes ({} per group, {} inode-table blocks per group), {} used",
         g.inodes_count(),
         g.ipg,
         g.itb,
         g.inodes_count() - sb.free_inodes_count as u64
-    );
-    eprintln!(
-        "kext2: {} blocks of content, {} free, {} reserved, lost+found {}",
+    ));
+    info(format!(
+        "{} blocks of content, {} free, {} reserved, lost+found {}",
         p.total_blocks_used,
         sb.free_blocks_count,
         p.reserved,
         if p.lost_found.is_some() { "yes" } else { "no" }
-    );
-    eprintln!(
-        "kext2: features: {}sparse_super{}",
+    ));
+    info(format!(
+        "features: {}sparse_super{}",
         if p.filetype { "filetype " } else { "" },
         if p.large_file { " large_file" } else { "" }
-    );
+    ));
 }
 
 /// Entry point used by the binary: returns the exit status.
@@ -240,7 +262,7 @@ pub fn main_with_args(args: Vec<OsString>) -> i32 {
             0
         }
         Ok(Action::Run(o)) => match build(&o, std::env::var_os("SOURCE_DATE_EPOCH")) {
-            Ok(()) => 0,
+            Ok(_) => 0,
             Err(e) => {
                 eprintln!("kext2: {}", e.msg);
                 1

@@ -1,0 +1,39 @@
+{
+  "name": "@tuler/kext2-darwin-x64",
+  "version": "0.1.0",
+  "cpu": [
+    "x64"
+  ],
+  "main": "kext2.darwin-x64.node",
+  "files": [
+    "kext2.darwin-x64.node"
+  ],
+  "description": "kext2 native binding for darwin-x64",
+  "keywords": [
+    "ext2",
+    "filesystem",
+    "image",
+    "genext2fs",
+    "reproducible",
+    "cartesi"
+  ],
+  "homepage": "https://github.com/tuler/kext2",
+  "license": "Apache-2.0",
+  "engines": {
+    "node": ">= 18"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/tuler/kext2.git",
+    "directory": "crates/kext2-node"
+  },
+  "publishConfig": {
+    "access": "public"
+  },
+  "os": [
+    "darwin"
+  ],
+  "scripts": {
+    "prepublishOnly": "node -e \"require('fs').accessSync('kext2.darwin-x64.node')\""
+  }
+}

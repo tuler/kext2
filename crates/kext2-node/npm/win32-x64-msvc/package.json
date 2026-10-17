@@ -1,0 +1,39 @@
+{
+  "name": "@tuler/kext2-win32-x64-msvc",
+  "version": "0.1.0",
+  "cpu": [
+    "x64"
+  ],
+  "main": "kext2.win32-x64-msvc.node",
+  "files": [
+    "kext2.win32-x64-msvc.node"
+  ],
+  "description": "kext2 native binding for win32-x64-msvc",
+  "keywords": [
+    "ext2",
+    "filesystem",
+    "image",
+    "genext2fs",
+    "reproducible",
+    "cartesi"
+  ],
+  "homepage": "https://github.com/tuler/kext2",
+  "license": "Apache-2.0",
+  "engines": {
+    "node": ">= 18"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/tuler/kext2.git",
+    "directory": "crates/kext2-node"
+  },
+  "publishConfig": {
+    "access": "public"
+  },
+  "os": [
+    "win32"
+  ],
+  "scripts": {
+    "prepublishOnly": "node -e \"require('fs').accessSync('kext2.win32-x64-msvc.node')\""
+  }
+}

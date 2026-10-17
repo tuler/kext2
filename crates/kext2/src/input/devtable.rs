@@ -4,7 +4,6 @@ use super::Ctx;
 use crate::error::{io_err, show, warn, Error, Result};
 use crate::tree::{Data, Kind, Node, NodeId, Reg};
 use std::io::Read;
-use std::os::unix::fs::MetadataExt;
 
 /// One parsed device-table line.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -116,7 +115,7 @@ pub fn add_devtable(ctx: &mut Ctx, src: &std::ffi::OsStr, target: NodeId, t_fs: 
         }
         let mut f = std::fs::File::open(src).map_err(|e| io_err(&name, e))?;
         f.read_to_end(&mut text).map_err(|e| io_err(&name, e))?;
-        mtime = md.mtime();
+        mtime = crate::host::mtime(&md);
     }
     for (i, line) in text.split(|&b| b == b'\n').enumerate() {
         let lineno = i + 1;

@@ -6,7 +6,6 @@ use crate::runs::ZeroMapBuilder;
 use crate::tree::{Data, Kind, Node, NodeId, Reg, Tree, ROOT};
 use std::collections::HashMap;
 use std::fs::File;
-use std::os::unix::fs::FileExt;
 
 /// Parameters of the starting image used for the new one (R-X-3).
 #[derive(Debug, Clone)]
@@ -46,7 +45,7 @@ impl Img {
     fn read(&self, off: u64, buf: &mut [u8]) -> Result<()> {
         let mut done = 0;
         while done < buf.len() {
-            match self.f.read_at(&mut buf[done..], off + done as u64) {
+            match crate::host::read_at(&self.f, &mut buf[done..], off + done as u64) {
                 Ok(0) => return Err(Error::fatal(format!("{}: truncated image", self.name))),
                 Ok(n) => done += n,
                 Err(e) if e.kind() == std::io::ErrorKind::Interrupted => {}

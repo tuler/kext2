@@ -175,7 +175,7 @@ pub fn kext2(argv: &[&str]) -> Result<(), String> {
 pub fn kext2_threads(argv: &[&str], threads: Option<usize>) -> Result<(), String> {
     match kext2::cli::parse(args(argv)).map_err(|e| e.msg)? {
         kext2::cli::Action::Run(o) => {
-            kext2::build_with(&o, Some(OsString::from("1600000000")), threads).map_err(|e| e.msg)
+            kext2::build_with(&o, Some(OsString::from("1600000000")), threads).map(|_| ()).map_err(|e| e.msg)
         }
         _ => Ok(()),
     }

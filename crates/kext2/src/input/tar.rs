@@ -38,10 +38,22 @@ pub fn detect(magic: &[u8]) -> Compression {
 pub fn decoder<'a, R: Read + 'a>(c: Compression, r: R) -> io::Result<Box<dyn Read + 'a>> {
     Ok(match c {
         Compression::None => Box::new(r),
+        #[cfg(feature = "gzip")]
         Compression::Gzip => Box::new(flate2::read::MultiGzDecoder::new(BufReader::with_capacity(1 << 16, r))),
+        #[cfg(feature = "bzip2")]
         Compression::Bzip2 => Box::new(bzip2::read::MultiBzDecoder::new(BufReader::with_capacity(1 << 16, r))),
+        #[cfg(feature = "xz")]
         Compression::Xz => Box::new(liblzma::read::XzDecoder::new_multi_decoder(BufReader::with_capacity(1 << 16, r))),
+        #[cfg(feature = "zstd")]
         Compression::Zstd => Box::new(zstd::stream::read::Decoder::new(r)?),
+        #[allow(unreachable_patterns)]
+        other => {
+            let _ = BufReader::new(r);
+            return Err(io::Error::new(
+                io::ErrorKind::Unsupported,
+                format!("{other:?} compression is not supported by this build of kext2"),
+            ));
+        }
     })
 }
 

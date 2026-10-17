@@ -1,0 +1,120 @@
+name: CI
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch: {}
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  CARGO_TERM_COLOR: always
+  MKEXT2_VERSION: "0.1.1"
+
+jobs:
+  lint:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - run: rustup component add clippy rustfmt
+      - run: cargo fmt --all --check
+      - run: cargo clippy --workspace --all-targets -- -D warnings
+
+  test:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, ubuntu-24.04-arm, macos-latest]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version: 24
+      - run: cargo build --release
+      - run: cargo test --release --workspace
+      - name: Node binding
+        working-directory: crates/kext2-node
+        run: |
+          npm run build
+          npm test
+
+  windows:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version: 24
+      - run: cargo build --release
+      - run: cargo test --release --lib
+      - name: Smoke test
+        shell: bash
+        run: |
+          mkdir -p smoke/etc && echo hello > smoke/etc/hostname
+          target/release/kext2.exe -B 4096 -f -d smoke smoke.ext2
+          ls -l smoke.ext2
+      - name: Node binding
+        working-directory: crates/kext2-node
+        shell: bash
+        run: |
+          npm run build
+          node -e "const k = require('./index.js'); k.buildBuffer({ sizeInBlocks: 1024, faketime: true }).then(b => console.log('kext2', k.version(), b.length))"
+
+  # Black-box comparison with xgenext2fs and mkext2 (compare/run.py): every
+  # image is checked with e2fsck and a read-only Linux kernel mount.
+  compare:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Install xgenext2fs and mkext2
+        run: |
+          curl -fsSL -o /tmp/xgenext2fs.deb \
+            "https://github.com/cartesi/genext2fs/releases/download/v1.5.6/xgenext2fs_amd64.deb"
+          sudo apt-get update
+          sudo apt-get install -y /tmp/xgenext2fs.deb zstd
+          name="mkext2-${MKEXT2_VERSION}-x86_64-unknown-linux-musl"
+          curl -fsSL "https://github.com/tuler/mkext2/releases/download/cargo-mkext2-v${MKEXT2_VERSION}/${name}.tar.gz" | tar -xz -C /tmp
+          echo "MKEXT2=/tmp/${name}/mkext2" >> "$GITHUB_ENV"
+      - run: docker build -t kext2-tools compare/docker
+      - run: cargo build --release
+      - run: python3 compare/run.py --seeds 12
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        if: always()
+        with:
+          name: compare-results
+          path: compare/work/results.json
+          if-no-files-found: ignore
+
+  bench:
+    if: github.event_name == 'workflow_dispatch'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Install xgenext2fs and mkext2
+        run: |
+          curl -fsSL -o /tmp/xgenext2fs.deb \
+            "https://github.com/cartesi/genext2fs/releases/download/v1.5.6/xgenext2fs_amd64.deb"
+          sudo apt-get update
+          sudo apt-get install -y /tmp/xgenext2fs.deb
+          name="mkext2-${MKEXT2_VERSION}-x86_64-unknown-linux-musl"
+          curl -fsSL "https://github.com/tuler/mkext2/releases/download/cargo-mkext2-v${MKEXT2_VERSION}/${name}.tar.gz" | tar -xz -C /tmp
+          echo "MKEXT2=/tmp/${name}/mkext2" >> "$GITHUB_ENV"
+      - run: docker build -t kext2-tools compare/docker
+      - run: cargo build --release
+      - run: python3 compare/bench.py 1024 --out bench.md && cat bench.md >> "$GITHUB_STEP_SUMMARY"

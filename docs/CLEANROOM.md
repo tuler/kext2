@@ -99,3 +99,14 @@ public ext2 documentation, not from genext2fs or mkext2.
   `compare/run.py --seeds 20` shows 73/73 cases and 7/7 reproducibility checks,
   and the benchmark is in `docs/RESULTS.md`. Only binaries and images were
   inspected; no implementation source of mkext2 or genext2fs was read.
+- 2026-10-16, maintainer (Node.js binding and releases): kext2 became a
+  Cargo workspace (`crates/kext2`, `crates/kext2-node`), with an N-API binding
+  and Sampo release automation modeled on mkext2's. That work read only
+  mkext2's packaging and infrastructure files: the binding crate
+  `crates/mkext2-node` (API shape, napi-rs setup, npm packages), the root
+  `Cargo.toml`/`package.json`, `.sampo/`, `.github/workflows/`,
+  `scripts/publish-npm.sh` and `RELEASING.md`. No mkext2 engine source or
+  test (`crates/mkext2/src`, `crates/mkext2/tests`) and no genext2fs code
+  was read. To build on Windows, host I/O now goes through `src/host.rs`;
+  the image format and layout are unchanged, as `compare/run.py` showed
+  (0 failures, every reproducibility check identical).
