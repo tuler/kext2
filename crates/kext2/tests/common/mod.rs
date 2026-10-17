@@ -1,11 +1,10 @@
-//! Test helpers: a small tar writer and an image reader built on
-//! `kext2::image`.
+//! Test helpers: a small tar writer and an image reader.
 #![allow(dead_code)]
 
-use kext2::tree::{Data, Kind, NodeId, Tree, ROOT};
+pub mod image;
+
 use std::collections::BTreeMap;
 use std::ffi::OsString;
-use std::os::unix::fs::FileExt;
 use std::path::{Path, PathBuf};
 
 // ------------------------------------------------------------------- tar
@@ -205,75 +204,18 @@ pub struct E {
     pub data: Vec<u8>,
     pub target: Vec<u8>,
     pub dev: (u32, u32),
-    pub ino_group: NodeId,
+    /// Inode number.
+    pub ino: u64,
+    /// Regular files: mapped (logical block, physical block, count) runs.
+    pub map: Vec<(u64, u64, u64)>,
 }
 
-/// Read an image back into a path → entry map (via `kext2::image`).
+/// Largest file whose data [`read_image`] loads (larger ones: `map` only).
+pub const MAX_LOADED: u64 = 1 << 30;
+
+/// Read an image back into a path → entry map.
 pub fn read_image(img: &Path) -> BTreeMap<String, E> {
-    let mut t = Tree::new(0);
-    kext2::image::load(&mut t, img.as_os_str(), false).unwrap();
-    t.sort_dirs();
-    let mut out = BTreeMap::new();
-    let mut stack: Vec<(String, NodeId)> = vec![(String::new(), ROOT)];
-    while let Some((path, id)) = stack.pop() {
-        for (name, c) in t.children(id).to_vec() {
-            let pth = format!("{}/{}", path, String::from_utf8_lossy(&name));
-            let n = t.node(c);
-            let mut e = E {
-                kind: '?',
-                perm: n.perm,
-                uid: n.uid,
-                gid: n.gid,
-                mtime: n.mtime,
-                data: vec![],
-                target: vec![],
-                dev: (0, 0),
-                ino_group: c,
-            };
-            match &n.kind {
-                Kind::Dir(_) => {
-                    e.kind = 'd';
-                    stack.push((pth.clone(), c));
-                }
-                Kind::Reg(r) => {
-                    e.kind = 'f';
-                    e.data = read_data(&t, &r.data, r.size);
-                }
-                Kind::Symlink(x) => {
-                    e.kind = 'l';
-                    e.target = x.to_vec();
-                }
-                Kind::Chr(a, b) => {
-                    e.kind = 'c';
-                    e.dev = (*a, *b);
-                }
-                Kind::Blk(a, b) => {
-                    e.kind = 'b';
-                    e.dev = (*a, *b);
-                }
-                Kind::Fifo => e.kind = 'p',
-                Kind::Sock => e.kind = 's',
-            }
-            out.insert(pth, e);
-        }
-    }
-    out
-}
-
-fn read_data(t: &Tree, d: &Data, size: u64) -> Vec<u8> {
-    let mut v = vec![0u8; size as usize];
-    if let Data::Image { src, bs, map } = d {
-        let f = &t.sources[*src as usize].file;
-        let bs = *bs as u64;
-        for &(l, b, c) in map.iter() {
-            let s = l * bs;
-            let e = ((l + c) * bs).min(size);
-            if s < e {
-                f.read_exact_at(&mut v[s as usize..e as usize], b * bs).unwrap();
-            }
-        }
-    }
-    v
+    image::read(img.as_os_str()).unwrap()
 }
 
 pub fn u32_at(b: &[u8], off: usize) -> u32 {

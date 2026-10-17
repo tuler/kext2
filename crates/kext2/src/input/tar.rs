@@ -4,7 +4,6 @@
 
 use super::Ctx;
 use crate::error::{io_err, show, warn, Error, Result};
-use crate::runs::ZeroMapBuilder;
 use crate::tree::{Added, Data, Kind, Node, NodeId, Reg, Region};
 use std::collections::{HashMap, HashSet};
 use std::fs::File;
@@ -815,7 +814,7 @@ fn process_member(
                         t as char
                     ));
                 }
-                Kind::Reg(Box::new(Reg { size: 0, data: Data::Zero, zmap: None }))
+                Kind::Reg(Box::new(Reg { size: 0, data: Data::Zero }))
             }
         }
     };
@@ -858,32 +857,12 @@ fn process_member(
     };
     let regs = regions(&map, real, base_off, avail)?;
     let stored: u64 = regs.iter().map(|r| r.len).sum();
-    let mut z = if ctx.holes { Some(ZeroMapBuilder::new(ctx.bs)) } else { None };
-    if direct.is_none() || z.is_some() {
-        // stream the stored data: to the spool and/or the zero map
-        let mut ri = 0usize;
-        let mut in_reg = 0u64;
-        let sp = spool.as_mut();
-        let mut sp = if direct.is_none() { sp } else { None };
+    if direct.is_none() {
+        // stream the stored data to the spool
+        let s = spool.as_mut().expect("spool created above");
         input.consume(stored, |chunk| {
-            if let Some(s) = sp.as_mut() {
-                s.w.write_all(chunk).map_err(|e| io_err("spool file", e))?;
-                s.len += chunk.len() as u64;
-            }
-            if let Some(z) = z.as_mut() {
-                let mut c = chunk;
-                while !c.is_empty() {
-                    let r = &regs[ri];
-                    let take = ((r.len - in_reg) as usize).min(c.len());
-                    z.feed(r.off + in_reg, &c[..take]);
-                    in_reg += take as u64;
-                    c = &c[take..];
-                    if in_reg == r.len {
-                        ri += 1;
-                        in_reg = 0;
-                    }
-                }
-            }
+            s.w.write_all(chunk).map_err(|e| io_err("spool file", e))?;
+            s.len += chunk.len() as u64;
             Ok(())
         })?;
     } else {
@@ -893,7 +872,6 @@ fn process_member(
     if let Kind::Reg(r) = &mut ctx.tree.node_mut(id).kind {
         r.size = real;
         r.data = if regs.is_empty() { Data::Zero } else { Data::Source { src, regions: regs.into() } };
-        r.zmap = z.map(|z| Box::new(z.finish()));
     }
     Ok(())
 }

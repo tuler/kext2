@@ -8,25 +8,22 @@
 // Style lints whose suggestions need very recent toolchains or hurt clarity.
 #![allow(unknown_lints, clippy::needless_late_init, clippy::chunks_exact_to_as_chunks)]
 
-pub mod blockmap;
 pub mod cli;
 pub mod dirent;
 pub mod error;
 pub mod format;
 pub mod geometry;
 pub mod host;
-pub mod image;
 pub mod input;
 pub mod layout;
 #[cfg(feature = "memstats")]
 pub mod memstats;
 pub mod plan;
-pub mod runs;
 pub mod tree;
 pub mod write;
 
-use cli::{Action, LayerKind, Options, Readjust, TimeMode};
-use error::{info, warn, Error, Result};
+use cli::{Action, LayerKind, Options, TimeMode};
+use error::{info, Error, Result};
 use input::Ctx;
 use std::ffi::OsString;
 use tree::{Node, Tree, ROOT};
@@ -60,7 +57,6 @@ pub struct Summary {
     pub block_size: u32,
     pub blocks: u64,
     pub free_blocks: u64,
-    pub reserved_blocks: u64,
     pub inodes: u64,
     pub free_inodes: u64,
     pub groups: u64,
@@ -81,68 +77,15 @@ pub fn build_with(o: &Options, sde: Option<OsString>, threads: Option<usize>) ->
     let out_regular = out_md.as_ref().map(|m| m.is_file()).unwrap_or(!out_is_stdout);
 
     let mut tree = Tree::new(t_fs);
-    let mut bs = o.block_size;
-    let mut label = o.label.clone().unwrap_or_default();
-    let mut creator_os = o.creator_os;
-    let mut uuid = [0u8; 16];
-    let mut blocks = o.blocks;
-    let mut min_inodes = o.inodes.unwrap_or(0);
-    let mut fixed_reserved = None;
-    let mut bytes_per_inode = o.bytes_per_inode;
-    // -r (SPEC Appendix C.1): +N adds free blocks, N means exactly N blocks;
-    // ignored with -b.
-    let mut readjust = 0;
-    match (o.readjust, o.blocks) {
-        (Some(_), Some(_)) => warn("-r is ignored when -b is given"),
-        (Some(Readjust::Extra(n)), None) => readjust = n,
-        (Some(Readjust::Absolute(n)), None) => blocks = Some(n),
-        (None, _) => {}
-    }
-
-    if let Some(x) = &o.starting_image {
-        // The starting image may be the output when the output is a regular
-        // file: it is read through an open descriptor and replaced by rename.
-        if output_id.is_some() && file_id(x) == output_id && !out_regular {
-            return Err(Error::fatal("the starting image is also the output"));
-        }
-        info(format!("starting from image {}", x.to_string_lossy()));
-        let ip = image::load(&mut tree, x, o.holes)?;
-        let ignored = [
-            (o.block_size_set, "-B"),
-            (o.blocks.is_some(), "-b"),
-            (o.inodes.is_some(), "-N"),
-            (o.bytes_per_inode.is_some(), "-i"),
-            (o.reserved_set, "-m"),
-            (o.readjust.is_some(), "-r"),
-            (o.label.is_some(), "-L"),
-            (o.creator_os_set, "-o"),
-        ];
-        for (given, opt) in ignored {
-            if given {
-                warn(format!("{opt} is ignored with -x (taken from the starting image)"));
-            }
-        }
-        bs = ip.bs;
-        blocks = Some(ip.blocks);
-        min_inodes = ip.inodes;
-        fixed_reserved = Some(ip.reserved);
-        bytes_per_inode = None;
-        readjust = 0;
-        let end = ip.label.iter().position(|&b| b == 0).unwrap_or(16);
-        label = ip.label[..end].to_vec();
-        creator_os = ip.creator_os;
-        uuid = ip.uuid;
-    } else if o.reserved_pct > 0 {
-        let mut lf = Node::dir(0o700, 0, 0, t_fs);
-        lf.generated = true;
-        let id = tree.push(lf);
-        tree.link_child(ROOT, b"lost+found", id);
-    }
+    // lost+found comes before the layers, so an input lost+found directory
+    // merges into it (R-RES-1)
+    let mut lf = Node::dir(0o700, 0, 0, t_fs);
+    lf.generated = true;
+    let id = tree.push(lf);
+    tree.link_child(ROOT, b"lost+found", id);
 
     let mut ctx = Ctx {
         tree,
-        bs,
-        holes: o.holes,
         squash_uid: o.squash_uid,
         squash_perms: o.squash_perms,
         host_links: Default::default(),
@@ -176,16 +119,7 @@ pub fn build_with(o: &Options, sde: Option<OsString>, threads: Option<usize>) ->
     tree.nodes.shrink_to_fit();
     tree.host_dirs.shrink_to_fit();
 
-    let params = plan::Params {
-        bs,
-        blocks,
-        readjust,
-        bytes_per_inode,
-        min_inodes,
-        reserved_pct: o.reserved_pct,
-        fixed_reserved,
-        filetype: creator_os != 1,
-    };
+    let params = plan::Params::from_free_space(o.free_space);
     let t_scan = t0.elapsed();
     #[cfg(feature = "memstats")]
     memstats::report("scan");
@@ -193,24 +127,19 @@ pub fn build_with(o: &Options, sde: Option<OsString>, threads: Option<usize>) ->
     let t_plan = t0.elapsed();
     #[cfg(feature = "memstats")]
     memstats::report("plan");
-    for p in &o.block_maps {
-        if blockmap::resolve(&tree, &plan, p).is_none() {
-            return Err(Error::fatal(format!("path {} not found in filesystem", error::show(p))));
-        }
-    }
+    let label = o.label.as_deref().unwrap_or_default();
     let mut lab = [0u8; 16];
     lab[..label.len().min(16)].copy_from_slice(&label[..label.len().min(16)]);
-    let settings = write::Settings { t_fs, time: o.time, fill: o.fill, creator_os, label: lab, uuid };
+    let settings = write::Settings { t_fs, time: o.time, label: lab };
     let r = write::Renderer::new(&tree, &plan, &settings);
     if o.verbose {
         describe(&r);
     }
     let sb = r.superblock();
     let summary = Summary {
-        block_size: plan.geo.bs,
+        block_size: geometry::BS,
         blocks: plan.geo.blocks,
         free_blocks: sb.free_blocks_count as u64,
-        reserved_blocks: plan.reserved,
         inodes: plan.geo.inodes_count(),
         free_inodes: sb.free_inodes_count as u64,
         groups: plan.geo.groups,
@@ -221,7 +150,6 @@ pub fn build_with(o: &Options, sde: Option<OsString>, threads: Option<usize>) ->
     }
     #[cfg(feature = "memstats")]
     memstats::report("write");
-    blockmap::write_all(&tree, &plan, &o.block_maps)?;
     if o.verbose {
         let t_write = t0.elapsed();
         info(format!(
@@ -239,7 +167,7 @@ fn describe(r: &write::Renderer) {
     let p = r.plan;
     let g = &p.geo;
     let sb = r.superblock();
-    info(format!("block size {}, {} blocks, {} groups of {} blocks", g.bs, g.blocks, g.groups, g.bpg));
+    info(format!("block size {}, {} blocks, {} groups of {} blocks", geometry::BS, g.blocks, g.groups, g.bpg));
     info(format!(
         "{} inodes ({} per group, {} inode-table blocks per group), {} used",
         g.inodes_count(),
@@ -247,18 +175,8 @@ fn describe(r: &write::Renderer) {
         g.itb,
         g.inodes_count() - sb.free_inodes_count as u64
     ));
-    info(format!(
-        "{} blocks of content, {} free, {} reserved, lost+found {}",
-        p.total_blocks_used,
-        sb.free_blocks_count,
-        p.reserved,
-        if p.lost_found.is_some() { "yes" } else { "no" }
-    ));
-    info(format!(
-        "features: {}sparse_super{}",
-        if p.filetype { "filetype " } else { "" },
-        if p.large_file { " large_file" } else { "" }
-    ));
+    info(format!("{} blocks of content, {} free", p.total_blocks_used, sb.free_blocks_count));
+    info(format!("features: filetype sparse_super{}", if p.large_file { " large_file" } else { "" }));
 }
 
 /// Entry point used by the binary: returns the exit status.

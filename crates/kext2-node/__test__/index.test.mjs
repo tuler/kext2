@@ -37,16 +37,17 @@ test('version', () => {
 test('build, buildSync and buildBuffer match the command line tool', { skip: !existsSync(cli) && 'kext2 CLI not built' }, async () => {
   const { dir, root } = makeTree()
   try {
-    const args = ['-B', '4096', '-f', '-r', '+100', '-L', 'node', '-d', root]
+    const args = ['-f', '--free-space', '400K', '-L', 'node', '-d', root]
     reference([...args, join(dir, 'ref.ext2')], dir)
     const ref = readFileSync(join(dir, 'ref.ext2'))
-    const opts = { blockSize: 4096, faketime: true, readjustment: '+100', volumeLabel: 'node', layers: [{ type: 'dir', path: root }] }
+    const opts = { faketime: true, freeSpace: 400 * 1024, volumeLabel: 'node', layers: [{ type: 'dir', path: root }] }
 
     const info = await ext2.build(join(dir, 'a.ext2'), opts)
     assert.ok(ref.equals(readFileSync(join(dir, 'a.ext2'))))
     assert.equal(info.blockSize, 4096)
     assert.equal(info.blocks * 4096, ref.length)
     assert.ok(info.freeBlocks >= 100)
+    assert.ok(info.freeInodes >= 25)
     assert.ok(info.inodes > info.freeInodes)
     assert.ok(info.messages.some((m) => m.level === 'info' && m.text.includes(root)))
 
@@ -69,7 +70,7 @@ test('tar archives from files and buffers', { skip: process.platform === 'win32'
   try {
     const tarPath = join(dir, 'root.tar')
     execFileSync('tar', ['-cf', tarPath, '-C', root, '.'], { env: { ...process.env, COPYFILE_DISABLE: '1' } })
-    const opts = (layer) => ({ blockSize: 4096, faketime: true, readjustment: '+500', layers: [layer] })
+    const opts = (layer) => ({ faketime: true, freeSpace: 2_000_000, layers: [layer] })
     const fromFile = await ext2.buildBuffer(opts({ type: 'tar', path: tarPath }))
     const fromBuffer = await ext2.buildBuffer(opts({ type: 'tar', data: readFileSync(tarPath) }))
     assert.ok(fromFile.equals(fromBuffer))
@@ -82,10 +83,9 @@ test('layer targets, device tables and fixed timestamps', async () => {
   const { dir, root } = makeTree()
   try {
     const opts = {
-      blockSize: 1024,
       timestamp: 1700000000,
       squashUids: 0,
-      readjustment: '+300',
+      freeSpace: 1_200_000,
       layers: [
         { type: 'devtable', data: Buffer.from('/opt d 755 0 0 - - - - -\n/dev d 755 0 0 - - - - -\n/dev/null c 666 0 0 1 3 - - -\n') },
         { type: 'dir', path: root, target: '/opt/app' },
@@ -103,29 +103,31 @@ test('layer targets, device tables and fixed timestamps', async () => {
 })
 
 test('source date epoch sets the filesystem time', async () => {
-  const img = await ext2.buildBuffer({ sizeInBlocks: 2048, sourceDateEpoch: 1600000000 })
+  const img = await ext2.buildBuffer({ freeSpace: 8 << 20, sourceDateEpoch: 1600000000 })
   assert.equal(img.readUInt32LE(1024 + 48), 1600000000)
 })
 
 test('verbose output and warnings go to messages', async () => {
+  const devtable = Buffer.from('/x d 755 0 0 - - - - -\n/x/y l 777 0 0 - - - - -\n')
   const info = await ext2.build(join(tmpdir(), `kext2-node-${process.pid}.ext2`), {
-    sizeInBlocks: 4096,
-    readjustment: '+10',
+    freeSpace: 1 << 20,
     verbose: true,
     faketime: true,
+    layers: [{ type: 'devtable', data: devtable }],
   })
   rmSync(join(tmpdir(), `kext2-node-${process.pid}.ext2`), { force: true })
-  assert.ok(info.messages.some((m) => m.level === 'warning' && /-r/.test(m.text)))
-  assert.ok(info.messages.some((m) => m.level === 'info' && /block size 1024/.test(m.text)))
+  assert.ok(info.messages.some((m) => m.level === 'warning' && /line 2/.test(m.text)))
+  assert.ok(info.messages.some((m) => m.level === 'info' && /block size 4096/.test(m.text)))
 })
 
 test('errors reject with a message', async () => {
   const out = join(tmpdir(), `kext2-node-err-${process.pid}.ext2`)
-  await assert.rejects(ext2.buildBuffer({ blockSize: 1000 }), /block size/i)
+  await assert.rejects(ext2.buildBuffer({ freeSpace: -1 }), /-1/)
   await assert.rejects(ext2.build(out, { layers: [{ type: 'dir', path: '/does/not/exist' }] }), /does\/not\/exist/)
-  await assert.rejects(ext2.build(out, { sizeInBlocks: 5, layers: [{ type: 'devtable', data: Buffer.from('/a d 755 0 0 - - - - -\n') }] }), /too small/)
+  await assert.rejects(ext2.build(out, { freeSpace: 2 ** 45 }), /free-space/)
   await assert.rejects(ext2.kext2(['--bogus', 'x.img']), /bogus/)
-  assert.throws(() => ext2.buildSync(out, { readjustment: '+5x' }), /5x/)
+  await assert.rejects(ext2.kext2(['-B', '4096', 'x.img']), /invalid option/)
+  assert.throws(() => ext2.buildSync(out, { freeSpace: -5 }), /-5/)
   assert.throws(() => ext2.buildSync(out, { layers: [{ type: 'zip', path: 'a' }] }), /unknown layer type/)
   assert.throws(() => ext2.buildSync(out, { layers: [{ type: 'dir', data: Buffer.from('x') }] }), /need a path/)
   assert.throws(() => ext2.buildSync('-', {}), /standard output/)
@@ -143,10 +145,8 @@ test('builds run off the main thread', async () => {
     let ticks = 0
     const timer = setInterval(() => ticks++, 1)
     await ext2.build(join(dir, 'a.ext2'), {
-      blockSize: 1024,
       faketime: true,
-      sizeInBlocks: 2_000_000,
-      fillValue: 7,
+      freeSpace: 2 ** 31,
       layers: [{ type: 'dir', path: root }],
     })
     clearInterval(timer)

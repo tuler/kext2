@@ -10,9 +10,6 @@ use std::collections::HashMap;
 /// Scan-phase state shared by the layers.
 pub struct Ctx {
     pub tree: Tree,
-    pub bs: u32,
-    /// `-z`: compute zero-block maps.
-    pub holes: bool,
     pub squash_uid: Option<u32>,
     pub squash_perms: bool,
     /// Hard-link detection across `-d` layers: (st_dev, st_ino) → node.
