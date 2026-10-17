@@ -2,12 +2,11 @@
 
 use super::Ctx;
 use crate::error::{io_err, warn, Error, Result};
+use crate::host;
 use crate::runs::ZeroMapBuilder;
 use crate::tree::{Added, Data, Kind, Node, NodeId, Reg};
 use std::fs;
 use std::io::Read;
-use std::os::unix::ffi::OsStrExt;
-use std::os::unix::fs::{FileTypeExt, MetadataExt};
 use std::path::{Path, PathBuf};
 
 /// Host major/minor decoding (R-DIR-2).
@@ -44,8 +43,8 @@ pub fn add_dir(ctx: &mut Ctx, src: &Path, target: NodeId) -> Result<()> {
         for name in names {
             let path = hdir.join(&name);
             let st = fs::symlink_metadata(&path).map_err(|e| io_err(path.display(), e))?;
-            let nb = name.as_bytes();
-            if let Some(Added::New(id) | Added::Merged(id)) = add_entry(ctx, &path, nb, &st, idir)? {
+            let nb = host::os_bytes(&name);
+            if let Some(Added::New(id) | Added::Merged(id)) = add_entry(ctx, &path, &nb, &st, idir)? {
                 if st.is_dir() {
                     subdirs.push((path, id));
                 }
@@ -59,15 +58,16 @@ pub fn add_dir(ctx: &mut Ctx, src: &Path, target: NodeId) -> Result<()> {
 
 fn add_entry(ctx: &mut Ctx, path: &Path, name: &[u8], st: &fs::Metadata, idir: NodeId) -> Result<Option<Added>> {
     let ft = st.file_type();
-    let key = (st.dev(), st.ino());
-    if ft.is_file() && Some(key) == ctx.output_id {
+    let key = host::file_id(st);
+    if ft.is_file() && key.is_some() && key == ctx.output_id {
         warn(format!("skipping the output image {}", path.display()));
         return Ok(None);
     }
-    let perm = (st.mode() & 0o7777) as u16;
-    let (uid, gid) = (st.uid(), st.gid());
-    let mtime = st.mtime();
-    if !ft.is_dir() && st.nlink() > 1 {
+    let perm = host::perm(st);
+    let (uid, gid) = host::owner(st);
+    let mtime = host::mtime(st);
+    let key = key.filter(|_| !ft.is_dir() && host::nlink(st) > 1);
+    if let Some(key) = key {
         if let Some(&existing) = ctx.host_links.get(&key) {
             return Ok(Some(ctx.tree.add_link(idir, name, existing)));
         }
@@ -79,18 +79,18 @@ fn add_entry(ctx: &mut Ctx, path: &Path, name: &[u8], st: &fs::Metadata, idir: N
         Kind::Reg(Box::new(Reg { size, data: Data::Host(path.to_path_buf()), zmap: None }))
     } else if ft.is_symlink() {
         let t = fs::read_link(path).map_err(|e| io_err(path.display(), e))?;
-        Kind::Symlink(t.as_os_str().as_bytes().into())
-    } else if ft.is_char_device() || ft.is_block_device() {
-        let (ma, mi) = host_major_minor(st.rdev());
+        Kind::Symlink(host::os_bytes(t.as_os_str()).into())
+    } else if host::is_char_device(&ft) || host::is_block_device(&ft) {
+        let (ma, mi) = host_major_minor(host::rdev(st));
         let (ma, mi) = (ma.min(u32::MAX as u64) as u32, mi.min(u32::MAX as u64) as u32);
-        if ft.is_char_device() {
+        if host::is_char_device(&ft) {
             Kind::Chr(ma, mi)
         } else {
             Kind::Blk(ma, mi)
         }
-    } else if ft.is_fifo() {
+    } else if host::is_fifo(&ft) {
         Kind::Fifo
-    } else if ft.is_socket() {
+    } else if host::is_socket(&ft) {
         Kind::Sock
     } else {
         warn(format!("skipping {}: unsupported file type", path.display()));
@@ -102,7 +102,7 @@ fn add_entry(ctx: &mut Ctx, path: &Path, name: &[u8], st: &fs::Metadata, idir: N
     ctx.squash(&mut node);
     let added = ctx.tree.add_entry(idir, name, node);
     if let Added::New(id) = added {
-        if !ft.is_dir() && st.nlink() > 1 {
+        if let Some(key) = key {
             ctx.host_links.insert(key, id);
         }
         if is_reg && ctx.holes {

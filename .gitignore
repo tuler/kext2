@@ -1,3 +1,8 @@
 target/
 compare/work/
 __pycache__/
+node_modules/
+*.node
+crates/kext2-node/npm/*/*.node
+dist/
+.DS_Store

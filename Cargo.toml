@@ -1,27 +1,13 @@
-[package]
-name = "kext2"
-version = "0.1.0"
+[workspace]
+resolver = "2"
+members = ["crates/kext2", "crates/kext2-node"]
+default-members = ["crates/kext2"]
+
+[workspace.package]
 edition = "2021"
 license = "Apache-2.0"
-description = "Build ext2 filesystem images from directories, tar archives and device tables, without root"
-readme = "README.md"
-keywords = ["ext2", "filesystem", "image", "mkfs"]
-categories = ["filesystem", "command-line-utilities"]
-
-[lib]
-name = "kext2"
-path = "src/lib.rs"
-
-[[bin]]
-name = "kext2"
-path = "src/main.rs"
-
-[dependencies]
-flate2 = { version = "1.1", default-features = false, features = ["zlib-rs"] }
-bzip2 = "0.6"
-liblzma = { version = "0.4", features = ["static"] }
-zstd = "0.13"
-tempfile = "3"
+repository = "https://github.com/tuler/kext2"
+rust-version = "1.87"
 
 [profile.release]
 opt-level = 3

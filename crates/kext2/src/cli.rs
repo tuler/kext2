@@ -1,8 +1,7 @@
 //! Command line (SPEC §2): GNU `getopt_long` semantics and option validation.
 
 use crate::error::{Error, Result};
-use std::ffi::{OsStr, OsString};
-use std::os::unix::ffi::{OsStrExt, OsStringExt};
+use std::ffi::OsString;
 
 pub const VERSION: &str = env!("CARGO_PKG_VERSION");
 
@@ -230,15 +229,21 @@ pub fn parse_num(opt: char, arg: &[u8], lo: u64, hi: u64) -> Result<u64> {
 }
 
 /// Split `src[:path]` at the first `:` and parse the image path (R-CLI-6).
+/// On Windows, the colon of a drive prefix (`C:\`, `C:/`) is not a separator.
 pub fn parse_layer(kind: LayerKind, arg: &[u8]) -> Result<Layer> {
-    let (src, path) = match arg.iter().position(|&b| b == b':') {
-        Some(i) => (&arg[..i], &arg[i + 1..]),
+    let skip = if cfg!(windows) && drive_prefix(arg) { 2 } else { 0 };
+    let (src, path) = match arg[skip..].iter().position(|&b| b == b':') {
+        Some(i) => (&arg[..skip + i], &arg[skip + i + 1..]),
         None => (arg, &b""[..]),
     };
     let path = parse_image_path(path).map_err(|_| {
         Error::usage(format!("invalid image path in '{}': '..' is not allowed", String::from_utf8_lossy(arg)))
     })?;
-    Ok(Layer { kind, src: OsString::from_vec(src.to_vec()), path })
+    Ok(Layer { kind, src: crate::host::os_string(src.to_vec()), path })
+}
+
+fn drive_prefix(arg: &[u8]) -> bool {
+    arg.len() >= 3 && arg[0].is_ascii_alphabetic() && arg[1] == b':' && (arg[2] == b'\\' || arg[2] == b'/')
 }
 
 /// Split an image path into components, dropping empty and `.` components.
@@ -290,7 +295,7 @@ fn apply(o: &mut Options, ts: &mut TimeSeen, c: char, arg: Option<&[u8]>) -> Res
             if o.starting_image.is_some() {
                 return Err(Error::usage("-x/--starting-image may be given only once"));
             }
-            o.starting_image = Some(OsStr::from_bytes(a()).to_os_string());
+            o.starting_image = Some(crate::host::os_string(a().to_vec()));
         }
         'd' => o.layers.push(parse_layer(LayerKind::Dir, a())?),
         'a' => o.layers.push(parse_layer(LayerKind::Tar, a())?),
@@ -367,7 +372,7 @@ where
     I: IntoIterator<Item = S>,
     S: Into<OsString>,
 {
-    let args: Vec<Vec<u8>> = args.into_iter().map(|s| s.into().into_vec()).collect();
+    let args: Vec<Vec<u8>> = args.into_iter().map(|s| crate::host::os_bytes(&s.into())).collect();
     let mut o = Options::default();
     let mut ts = TimeSeen::default();
     let mut operands: Vec<Vec<u8>> = Vec::new();
@@ -477,7 +482,7 @@ where
         1 => {}
         _ => return Err(Error::usage("Too many arguments")),
     }
-    o.image = OsString::from_vec(operands.pop().unwrap());
+    o.image = crate::host::os_string(operands.pop().unwrap());
     Ok(Action::Run(Box::new(o)))
 }
 

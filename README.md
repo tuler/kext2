@@ -8,16 +8,59 @@ byte-for-byte reproducible.
 It was written in a clean room from [`docs/SPEC.md`](docs/SPEC.md) and the
 public ext2 documentation (see [`docs/CLEANROOM.md`](docs/CLEANROOM.md)).
 
+You can use it as:
+
+- a **command line tool** (`kext2`);
+- a **Rust library** (`kext2`);
+- a **Node.js native module** ([`@tuler/kext2`](crates/kext2-node/README.md)).
+
+## Installing
+
+Once released, prebuilt CLI binaries are attached to each GitHub release (the
+`cargo-kext2-vX.Y.Z` ones), for Linux (x86_64, arm64, static musl), macOS
+(x86_64, arm64) and Windows (x86_64). With Cargo:
+
+```bash
+cargo install kext2
+```
+
 ## Build
 
 ```bash
 cargo build --release        # target/release/kext2
-cargo test --release
+cargo test --release --workspace
+(cd crates/kext2-node && npm run build && npm test)   # Node.js binding
 ```
 
-Rust 2021 edition. It builds on macOS and Linux. The dependencies are
+It is a Cargo workspace: `crates/kext2` (library and CLI) and
+`crates/kext2-node` (the N-API binding, built with
+[napi-rs](https://napi.rs)). Rust 1.87 or later, 2021 edition. It builds on
+macOS, Linux and Windows. On Windows, host files have no owner, permission
+bits or inode identity: files are 0644 (0444 read-only), directories 0755,
+owned by 0:0, and hard links are not detected. The dependencies are
 permissively licensed: `flate2` (with `zlib-rs`), `bzip2` (with
-`libbz2-rs-sys`), `liblzma`, `zstd` and `tempfile`.
+`libbz2-rs-sys`), `liblzma`, `zstd` and `tempfile`. The decompressors are
+the Cargo features `gzip`, `bzip2`, `xz` and `zstd`, all on by default.
+
+## Node.js
+
+```ts
+import { build, buildBuffer, kext2 } from '@tuler/kext2'
+
+// the command line, in process (the same arguments as xgenext2fs)
+await kext2(['--block-size', '4096', '--faketime', '--readjustment', '+1000', '--root', 'rootfs', 'out.ext2'])
+
+// typed options; builds run on the libuv thread pool
+const info = await build('out.ext2', {
+  blockSize: 4096,
+  faketime: true,
+  readjustment: '+1000',
+  layers: [{ type: 'tar', path: 'rootfs.tar' }, { type: 'dir', path: 'extra', target: '/opt' }],
+})
+const image: Buffer = await buildBuffer({ blockSize: 4096, sizeInBlocks: 2560, faketime: true })
+```
+
+See [`crates/kext2-node/README.md`](crates/kext2-node/README.md).
 
 ## Usage
 
@@ -85,21 +128,21 @@ image is written to a temporary file next to it and renamed at the end.
 
 kext2 works in three phases (SPEC §3):
 
-1. **Scan** (`src/input/`). The layers build one in-memory tree in
+1. **Scan** (`crates/kext2/src/input/`). The layers build one in-memory tree in
    command-line order. Children are kept in hash maps, and the first entry for
    a path wins (SPEC R-IN-3). Regular files are not read here. kext2 records
    where their data can be read again: the host path, an offset in an
    uncompressed tar, or an offset in a spool file for compressed or piped
    archives. With `-z`, it also reads each file once to record which blocks
    are not zero. Decompression runs on its own thread.
-2. **Plan** (`src/plan.rs`, `geometry.rs`, `layout.rs`, `dirent.rs`). It
+2. **Plan** (`crates/kext2/src/plan.rs`, `geometry.rs`, `layout.rs`, `dirent.rs`). It
    sorts every directory once, checks the limits, decides on lost+found and
    the reserved count, and computes the exact size and geometry (SPEC §7).
    Then a single forward data cursor places every inode and block (SPEC §9).
    Each file's blocks, indirect blocks included, form one contiguous run.
    Top-level directories are spread over the block groups when there is free
    space. The plan is a list of extents in data-index order.
-3. **Write** (`src/write.rs`). The image is cut into 4 MiB chunks. Each chunk
+3. **Write** (`crates/kext2/src/write.rs`). The image is cut into 4 MiB chunks. Each chunk
    is a pure function of the plan, so several threads can render chunks at
    once: metadata, directory blocks, indirect blocks and file data read with
    `pread`. One writer thread writes the chunks in block order. In a regular
@@ -180,6 +223,12 @@ cargo build --release
 python3 compare/run.py                       # correctness + reproducibility
 python3 compare/bench.py 1024 --out compare/BENCH.md
 ```
+
+## Releasing
+
+Releases are automated with [Sampo](https://github.com/bruits/sampo)
+changesets and published from CI with OIDC trusted publishing; see
+[RELEASING.md](RELEASING.md).
 
 ## License
 

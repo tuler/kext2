@@ -1,0 +1,33 @@
+[package]
+name = "kext2"
+version = "0.1.0"
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+description = "Build ext2 filesystem images from directories, tar archives and device tables, without root"
+readme = "../../README.md"
+keywords = ["ext2", "filesystem", "image", "genext2fs", "reproducible"]
+categories = ["filesystem", "command-line-utilities"]
+
+[lib]
+name = "kext2"
+path = "src/lib.rs"
+
+[[bin]]
+name = "kext2"
+path = "src/main.rs"
+
+[features]
+default = ["gzip", "bzip2", "xz", "zstd"]
+gzip = ["dep:flate2"]
+bzip2 = ["dep:bzip2"]
+xz = ["dep:liblzma"]
+zstd = ["dep:zstd"]
+
+[dependencies]
+flate2 = { version = "1.1", optional = true, default-features = false, features = ["zlib-rs"] }
+bzip2 = { version = "0.6", optional = true }
+liblzma = { version = "0.4", optional = true, features = ["static"] }
+zstd = { version = "0.13", optional = true }
+tempfile = "3"

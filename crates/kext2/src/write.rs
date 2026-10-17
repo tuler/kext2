@@ -17,7 +17,6 @@ use crate::tree::{Data, Kind, NodeId, Tree, NONE, ROOT};
 use std::collections::BTreeMap;
 use std::fs::{File, OpenOptions};
 use std::io::Write;
-use std::os::unix::fs::{FileExt, FileTypeExt, OpenOptionsExt, PermissionsExt};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Condvar, Mutex};
@@ -586,7 +585,7 @@ impl<'a> Renderer<'a> {
 
 fn read_exact_at(f: &File, mut buf: &mut [u8], mut off: u64) -> std::io::Result<()> {
     while !buf.is_empty() {
-        match f.read_at(buf, off) {
+        match crate::host::read_at(f, buf, off) {
             Ok(0) => return Err(std::io::ErrorKind::UnexpectedEof.into()),
             Ok(n) => {
                 buf = &mut buf[n..];
@@ -654,13 +653,13 @@ fn open_temp(dest: &Path) -> Result<TempGuard> {
         _ => PathBuf::from("."),
     };
     let base = dest.file_name().map(|s| s.to_string_lossy().into_owned()).unwrap_or_else(|| "image".into());
-    let mode = std::fs::metadata(dest).map(|m| m.permissions().mode() & 0o7777).unwrap_or(0o666);
+    let existing = std::fs::metadata(dest).ok();
     for k in 0..1000u32 {
         let p = dir.join(format!(".{base}.kext2-{}-{k}.tmp", std::process::id()));
-        match OpenOptions::new().read(true).write(true).create_new(true).mode(0o666).open(&p) {
+        match crate::host::create_new(&p) {
             Ok(file) => {
-                if std::fs::metadata(dest).is_ok() {
-                    let _ = file.set_permissions(std::fs::Permissions::from_mode(mode));
+                if let Some(md) = &existing {
+                    crate::host::copy_permissions(md, &file);
                 }
                 return Ok(TempGuard { path: p, file, keep: false });
             }
@@ -699,7 +698,7 @@ pub fn write_image_threads(r: &Renderer, path: &std::ffi::OsStr, threads: usize)
     } else {
         let p = Path::new(path);
         match std::fs::metadata(p) {
-            Ok(m) if m.file_type().is_block_device() => {
+            Ok(m) if crate::host::is_block_device(&m.file_type()) => {
                 Out::Device(OpenOptions::new().write(true).open(p).map_err(|e| io_err(p.display(), e))?)
             }
             Ok(m) if m.is_dir() => return Err(Error::fatal(format!("{}: is a directory", p.display()))),
@@ -808,14 +807,16 @@ pub fn write_image_threads(r: &Renderer, path: &std::ffi::OsStr, threads: usize)
                     let mut r = Ok(());
                     let cm = if dense { vec![(0, len)] } else { coalesce(&marks.0, 64 << 10, len) };
                     for (o, l) in cm {
-                        r = tmp.file.write_all_at(&buf[o..o + l], off + o as u64);
+                        r = crate::host::write_all_at(&tmp.file, &buf[o..o + l], off + o as u64);
                         if r.is_err() {
                             break;
                         }
                     }
                     r.map_err(|e| io_err(tmp.path.display(), e))
                 }
-                Out::Device(dev) => dev.write_all_at(&buf[..len], off).map_err(|e| io_err("block device", e)),
+                Out::Device(dev) => {
+                    crate::host::write_all_at(dev, &buf[..len], off).map_err(|e| io_err("block device", e))
+                }
                 Out::Stream(w) => w.write_all(&buf[..len]).map_err(|e| io_err("write", e)),
             };
             if let Err(e) = res {
