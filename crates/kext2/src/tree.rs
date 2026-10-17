@@ -24,8 +24,9 @@ pub struct Region {
 pub enum Data {
     /// No backing data: every byte is zero (empty files, device-table files).
     Zero,
-    /// A host file, read again by path.
-    Host(PathBuf),
+    /// A host file, read again by path: `name` in host directory `dir`
+    /// ([`Tree::host_dirs`]). Directory paths are stored once.
+    Host { dir: u32, name: Box<std::ffi::OsStr> },
     /// Regions of a registered source file (tar archive or spool). Bytes not
     /// covered by a region are zero.
     Source { src: u32, regions: Box<[Region]> },
@@ -38,8 +39,9 @@ pub enum Data {
 pub struct Reg {
     pub size: u64,
     pub data: Data,
-    /// With `-z`: the logical blocks holding non-zero bytes.
-    pub zmap: Option<Runs>,
+    /// With `-z`: the logical blocks holding non-zero bytes (boxed: most
+    /// files have none, and every regular file carries the field).
+    pub zmap: Option<Box<Runs>>,
 }
 
 #[derive(Debug, Default)]
@@ -54,7 +56,8 @@ pub struct Dir {
 pub enum Kind {
     Dir(Box<Dir>),
     Reg(Box<Reg>),
-    Symlink(Box<[u8]>),
+    /// The target (boxed, so that `Kind`, in every node, stays two words).
+    Symlink(Box<Vec<u8>>),
     Chr(u32, u32),
     Blk(u32, u32),
     Fifo,
@@ -138,6 +141,8 @@ pub enum Added {
 pub struct Tree {
     pub nodes: Vec<Node>,
     pub sources: Vec<Source>,
+    /// Host directories holding [`Data::Host`] files.
+    pub host_dirs: Vec<PathBuf>,
     /// Filesystem time, for implicit directories.
     pub t_fs: i64,
 }
@@ -147,7 +152,7 @@ impl Tree {
     pub fn new(t_fs: i64) -> Tree {
         let mut root = Node::dir(0o755, 0, 0, t_fs);
         root.implicit = true;
-        Tree { nodes: vec![root], sources: Vec::new(), t_fs }
+        Tree { nodes: vec![root], sources: Vec::new(), host_dirs: Vec::new(), t_fs }
     }
 
     pub fn node(&self, id: NodeId) -> &Node {
@@ -162,6 +167,16 @@ impl Tree {
         assert!(id < NONE as usize, "too many nodes");
         self.nodes.push(n);
         id as NodeId
+    }
+
+    pub fn add_host_dir(&mut self, path: PathBuf) -> u32 {
+        self.host_dirs.push(path);
+        (self.host_dirs.len() - 1) as u32
+    }
+
+    /// Host path of a [`Data::Host`] file.
+    pub fn host_path(&self, dir: u32, name: &std::ffi::OsStr) -> PathBuf {
+        self.host_dirs[dir as usize].join(name)
     }
 
     pub fn add_source(&mut self, file: File, name: String) -> u32 {

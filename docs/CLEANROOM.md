@@ -110,3 +110,9 @@ public ext2 documentation, not from genext2fs or mkext2.
   was read. To build on Windows, host I/O now goes through `src/host.rs`;
   the image format and layout are unchanged, as `compare/run.py` showed
   (0 failures, every reproducibility check identical).
+- 2026-10-16, maintainer (memory): reduced kext2's per-file memory (host
+  directory paths stored once, `i_block` derived from extents, smaller
+  records) and added the development feature `memstats`. Images are
+  byte-identical before and after, checked on 36 builds and with
+  `compare/run.py`. A separate session optimized mkext2's memory in its own
+  repository; none of its code or design was read for this work.

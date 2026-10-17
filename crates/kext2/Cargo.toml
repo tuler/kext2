@@ -24,6 +24,8 @@ gzip = ["dep:flate2"]
 bzip2 = ["dep:bzip2"]
 xz = ["dep:liblzma"]
 zstd = ["dep:zstd"]
+# Development: heap accounting per phase (a counting global allocator).
+memstats = []
 
 [dependencies]
 flate2 = { version = "1.1", optional = true, default-features = false, features = ["zlib-rs"] }

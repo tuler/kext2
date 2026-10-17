@@ -164,7 +164,7 @@ impl<'a> Renderer<'a> {
                     blocks += nb - data_blocks; // indirect blocks
                     bytes += match &r.data {
                         Data::Zero => 0,
-                        Data::Host(_) => r.size,
+                        Data::Host { .. } => r.size,
                         Data::Source { regions, .. } => regions.iter().map(|g| g.len).sum(),
                         Data::Image { map, .. } => map.iter().map(|m| m.2 * bs).sum(),
                     };
@@ -316,7 +316,7 @@ impl<'a> Renderer<'a> {
             time: inode_time(self.s, id, node.mtime),
             links: plan.nlink[id as usize] as u16,
             blocks512: (nb * (bs / 512)) as u32,
-            block: plan.iblock[id as usize],
+            block: plan.iblock(id),
             fast_link: None,
             regular: false,
         };
@@ -387,7 +387,7 @@ impl<'a> Renderer<'a> {
                 self.indirect(i, dst);
             } else {
                 let node = self.tree.node(e.node);
-                let lfirst = e.lstart + (s - e.start);
+                let lfirst = e.lstart as u64 + (s - e.start);
                 match &node.kind {
                     Kind::Reg(_) => {
                         // only the ranges actually read are marked: zero
@@ -442,7 +442,7 @@ impl<'a> Renderer<'a> {
                         break;
                     }
                     if x.level == 1 {
-                        let idx = ((x.lstart - e.lstart) / p) as usize;
+                        let idx = ((x.lstart - e.lstart) as u64 / p) as usize;
                         format::put32(out, idx * 4, map.block(x.start) as u32);
                     }
                 }
@@ -451,7 +451,7 @@ impl<'a> Renderer<'a> {
                         break;
                     }
                     if x.level == 2 {
-                        let idx = ((x.lstart - e.lstart) / (p * p)) as usize;
+                        let idx = ((x.lstart - e.lstart) as u64 / (p * p)) as usize;
                         format::put32(out, idx * 4, map.block(x.start) as u32);
                     }
                 }
@@ -512,7 +512,8 @@ impl<'a> Renderer<'a> {
         };
         match &r.data {
             Data::Zero => {}
-            Data::Host(path) => {
+            Data::Host { dir, name } => {
+                let path = &self.tree.host_path(*dir, name);
                 let reuse = matches!(&cache.host, Some((cid, _)) if *cid == id);
                 if !reuse {
                     let f = File::open(path).map_err(|e| io_err(path.display(), e))?;

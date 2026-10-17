@@ -299,7 +299,7 @@ pub fn load(tree: &mut Tree, path: &std::ffi::OsStr, holes: bool) -> Result<Imag
                     Kind::Reg(Box::new(Reg {
                         size: x.size,
                         data: Data::Image { src, bs: bs as u32, map: map.into() },
-                        zmap,
+                        zmap: zmap.map(Box::new),
                     }))
                 }
                 0xA000 => {
