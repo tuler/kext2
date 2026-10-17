@@ -118,6 +118,26 @@ Exit status: 0 on success, 1 on any error. On failure, nothing is left at the
 output path. A file that was already there stays unchanged, because the
 image is written to a temporary file next to it and renamed at the end.
 
+## Performance
+
+Building a 1 GiB root filesystem (9,610 files) with 4 KiB blocks, compared
+with xgenext2fs 1.5.6. Best of 3 runs on an Apple M1 Max, with
+`compare/bench.py`:
+
+| input | xgenext2fs | kext2 | speedup |
+|---|---:|---:|---:|
+| directory | 2.36 s | 0.24 s | 9.8× |
+| tar | 2.15 s | 0.18 s | 11.8× |
+| tar.gz | 2.55 s | 0.79 s | 3.2× |
+
+kext2 is faster because it plans the whole layout first and then writes the
+image in block order from several threads. Decompression bounds the tar.gz
+case. The price is memory: xgenext2fs stays at about 3 MiB, while kext2
+uses about 45 MiB, mostly write buffers (see [Design](#design)). Both tools
+store the same file content, and both images pass `e2fsck`. See
+[`compare/BENCH.md`](compare/BENCH.md) and
+[`compare/MEMORY.md`](compare/MEMORY.md) for more cases.
+
 ## Design
 
 kext2 works in three phases (SPEC §3):
