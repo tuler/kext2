@@ -193,7 +193,6 @@ fn apply_node(ctx: &mut Ctx, name: &[u8], l: &Line, minor: i128, lineno: usize, 
         n.perm = l.mode;
         n.uid = l.uid as u32;
         n.gid = l.gid as u32;
-        n.fixed_up = true;
         return;
     }
     if !(0..=MAX_MINOR as i128).contains(&minor) {
@@ -202,7 +201,7 @@ fn apply_node(ctx: &mut Ctx, name: &[u8], l: &Line, minor: i128, lineno: usize, 
     }
     let (ma, mi) = (l.major as u32, minor as u32);
     let kind = match l.typ {
-        b'f' => Kind::Reg(Box::new(Reg { size: 0, data: Data::Zero, zmap: None })),
+        b'f' => Kind::Reg(Box::new(Reg { size: 0, data: Data::Zero })),
         b'd' => Kind::Dir(Box::default()),
         b'c' => Kind::Chr(ma, mi),
         b'b' => Kind::Blk(ma, mi),

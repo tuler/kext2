@@ -1,6 +1,7 @@
 # kext2 — Requirements and Design Specification
 
-Status: draft 1 (2026-10-16). Audience: the kext2 implementer (Rust) and the
+Status: draft 1 (2026-10-16), amended by Appendix C (C.2, 2026-10-17, narrows
+the command line and supersedes the rules it names). Audience: the kext2 implementer (Rust) and the
 verifier. This document, together with Dave Poirier's "The Second Extended
 File System" and the Linux kernel `Documentation/filesystems/ext2.rst` and
 `Documentation/filesystems/ext4/*.rst`, is the complete basis for the
@@ -1511,3 +1512,53 @@ R-CLI-4 are amended:
   does not change the inode count.
 - With `-b`, `-r` in either form is ignored with a warning (Q-11).
 - No other option gains a sign; `-r -N` is a usage error.
+
+### C.2 Amendment: reduced option set (2026-10-17, maintainer)
+
+kext2 no longer accepts the xgenext2fs command line. It keeps what
+reproducible root filesystems need and drops low-level controls. This
+amendment supersedes every rule below that names a removed option; the
+content rules (§4–§6, §8, §9) are unchanged.
+
+**Command line (§2).** The options are `-d`, `-a`, `-D`, `-L`, `-f`,
+`--timestamp`, `--clamp-timestamps`, `-U`, `-P`, `-q`, `-v`, `-h`, `-V` and
+the new `--free-space` (long only). `-B`, `-b`, `-r`, `-N`, `-i`, `-m`, `-o`,
+`-e`, `-z`, `-x` and `-g` are unrecognised options (usage error, R-CLI).
+Parsing still follows GNU `getopt_long` (R-CLI-1 … R-CLI-3).
+
+R-CLI-C2-1. `--free-space BYTES`: `BYTES` is a decimal number, optionally
+followed by `K`, `M`, `G` or `T` (case-insensitive, optionally followed by
+`iB`), meaning 2^10, 2^20, 2^30 or 2^40. The value is at most 2^44 (16 TiB);
+anything else is a usage error. Default 0. The last occurrence wins.
+
+**Block size.** `bs` is always 4096, so `fdb = 0` (block 0 holds the
+superblock at byte 1024), `ipb = 32`, `p = 1024`, and the R-FMT-15 limit is
+2,196,873,666,560 bytes. GEOMETRY (R-GEO-2) and SIZE (R-SIZE-3) are
+unchanged with these constants.
+
+R-RES-C2-1 (replaces R-RES-1 … R-RES-4). Before the first layer, the root
+receives the generated `lost+found` exactly as R-RES-1 describes for `m > 0`
+(it is always created; layers merge into it or are ignored as R-IN-3 says).
+Its directory data has `max(4, packed)` blocks (16 KiB, as mke2fs makes it;
+with `p = 1024` no indirect block). No blocks are reserved:
+`s_r_blocks_count = 0`.
+
+R-SIZE-C2-1 (replaces R-SIZE-2, R-SIZE-4, R-SIZE-5). Let `S` be the
+`--free-space` value, `F = ceil(S / 4096)` free blocks and `J = ceil(S /
+16384)` free inodes (mke2fs's default ratio). With `U` and `D` of R-SIZE-1,
+`I = 10 + U + J` and `B = SIZE(D, F, I)`. The image has `B` blocks and the
+geometry of `GEOMETRY(B, I)`; it therefore has at least `F` free blocks and
+at least `J` free inodes (both may be higher by the geometry's rounding).
+
+**Superblock (§8.2).** `s_creator_os` is 0 (Linux), `filetype` is always set,
+and `s_uuid` is zero. The volume label is still `-L`.
+
+**Data (§8.5, §8.6).** Every regular file is dense: its blocks are
+`[0, ceil(size/bs))`, and zero ranges of tar sparse members are stored as
+zero blocks. Free blocks are zero. In a regular output file, zero regions may
+still be left as holes (§10), which changes no byte of the image.
+
+**Removed features.** §11.1 (starting image) and §11.2 (block maps) no longer
+apply. The acceptance tests that use removed options (AT-*) are not run for
+kext2; the comparison harness runs the others without `-B`, comparing file
+content only.

@@ -114,6 +114,9 @@ def cases(seeds):
         ("clamp", ["-B", "4096", "--clamp-timestamps", "1650000000", "-d", inp("tree4096")], True),
         # xgenext2fs and mkext2 silently raise a too-small -b; kext2 fails (SPEC R-SIZE-5)
         ("too-small-b", ["-B", "1024", "-f", "-b", "100", "-d", inp("tree1024")], True, {"expect": {"kext2": False}}),
+        # kext2 only: free space and free inodes on top of the content
+        ("free-space", ["-f", "--free-space", "64M", "-d", inp("tree4096")], True),
+        ("free-space-tar", ["-f", "--free-space", "1G", "-a", inp("tree.gnu.tar")], True),
         ("missing-input", ["-B", "1024", "-f", "-d", inp("does-not-exist")], False),
         ("bad-block-size", ["-B", "3000", "-f", "-b", "1000"], False),
     ]
@@ -125,6 +128,17 @@ def cases(seeds):
         c.append((f"tar-sparse-{fmt}", ["-B", "1024", "-f", "-a", inp(f"sparse.{fmt}.tar")], True))
         c.append((f"tar-sparse-{fmt}-z", ["-B", "4096", "-f", "-z", "-a", inp(f"sparse.{fmt}.tar")], True))
     return c
+
+
+def without_lost_found(ref, tool, entries):
+    """kext2 always creates lost+found; when the reference image has none,
+    compare kext2's image without it (and without its link to the root)."""
+    if tool != "kext2" or "/lost+found" in ref or "/lost+found" not in entries:
+        return entries
+    out = {k: v for k, v in entries.items() if k != "/lost+found" and not k.startswith("/lost+found/")}
+    if "/" in out and out["/"].get("nlink"):
+        out["/"] = dict(out["/"], nlink=out["/"]["nlink"] - 1)
+    return out
 
 
 def copy_reversed(src, dst):
@@ -302,7 +316,7 @@ def main():
             for tool, t in ts.items():
                 if tool == ref or t.get("entries") is None:
                     continue
-                d = compare_manifests(ts[ref]["entries"], t["entries"])
+                d = compare_manifests(ts[ref]["entries"], without_lost_found(ts[ref]["entries"], tool, t["entries"]))
                 t["vs_ref"] = ref
                 t["diffs"] = d
             if ts.get("kext2", {}).get("entries") is not None:

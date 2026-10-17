@@ -17,26 +17,13 @@ export declare function buildBuffer(options: BuildOptions): Promise<Buffer>
 
 /** Image description; mirrors the command line options. */
 export interface BuildOptions {
-  /** 1024 (default), 2048 or 4096 (`-B`). */
-  blockSize?: number
-  /** Exact image size in blocks (`-b`); computed from the inputs when absent. */
-  sizeInBlocks?: number
-  /** `-r`: `"+N"` adds N free blocks to the computed size, `"N"` means exactly N blocks. */
-  readjustment?: string
-  /** Bytes per inode (`-i`); only effective with `sizeInBlocks`. */
-  bytesPerInode?: number
-  /** Minimum number of inodes (`-N`). */
-  numberOfInodes?: number
+  /**
+   * Free space to leave in the image, in bytes (`--free-space`), with one
+   * free inode per 16 KiB of it.
+   */
+  freeSpace?: number
   /** Volume label (`-L`, up to 16 bytes). */
   volumeLabel?: string
-  /** Percentage of reserved blocks (`-m`, default 5). */
-  reservedPercentage?: number
-  /** Creator OS (`-o`): `"linux"`, `"hurd"`, `"freebsd"`, `"lites"` or a number. */
-  creatorOs?: string
-  /** Fill unallocated blocks with this byte (`-e`). */
-  fillValue?: number
-  /** Store all-zero blocks as holes (`-z`). */
-  allowHoles?: boolean
   /** Every timestamp is 0 (`-f`). */
   faketime?: boolean
   /** Every timestamp (filesystem and files) is this value. */
@@ -52,10 +39,6 @@ export interface BuildOptions {
   squashUids?: number
   /** Remove group and other permissions (`-P`). */
   squashPerms?: boolean
-  /** Existing image to add to (`-x`). */
-  startingImage?: string
-  /** Image paths to write `.blk` block maps for (`-g`), in the current directory. */
-  blockMaps?: Array<string>
   /** Content layers, applied in order. */
   layers?: Array<LayerSpec>
   /** Writer threads (default: automatic). The image does not depend on it. */
@@ -66,10 +49,10 @@ export interface BuildOptions {
 
 /** Summary of a built image. */
 export interface BuildResult {
+  /** Always 4096. */
   blockSize: number
   blocks: number
   freeBlocks: number
-  reservedBlocks: number
   inodes: number
   freeInodes: number
   groups: number
@@ -81,8 +64,8 @@ export declare function buildSync(output: string, options: BuildOptions): BuildR
 
 /**
  * Run with command line arguments (without the program name), as the
- * `kext2` tool takes them (the same as xgenext2fs'), e.g.
- * `["--block-size", "4096", "--faketime", "--root", "dir", "out.ext2"]`.
+ * `kext2` tool takes them, e.g.
+ * `["--faketime", "--free-space", "64M", "--root", "dir", "out.ext2"]`.
  * Rejects with the error message when the tool would exit with an error.
  */
 export declare function kext2(args: Array<string>): Promise<RunResult>

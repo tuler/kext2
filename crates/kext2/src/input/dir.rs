@@ -3,10 +3,8 @@
 use super::Ctx;
 use crate::error::{io_err, warn, Error, Result};
 use crate::host;
-use crate::runs::ZeroMapBuilder;
 use crate::tree::{Added, Data, Kind, Node, NodeId, Reg};
 use std::fs;
-use std::io::Read;
 use std::path::{Path, PathBuf};
 
 /// Host major/minor decoding (R-DIR-2).
@@ -92,7 +90,7 @@ fn add_entry(
     } else if ft.is_file() {
         let size = st.len();
         let (dir, name) = host.expect("regular files carry their host name");
-        Kind::Reg(Box::new(Reg { size, data: Data::Host { dir, name }, zmap: None }))
+        Kind::Reg(Box::new(Reg { size, data: Data::Host { dir, name } }))
     } else if ft.is_symlink() {
         let t = fs::read_link(path).map_err(|e| io_err(path.display(), e))?;
         Kind::Symlink(host::os_bytes(t.as_os_str()).into())
@@ -113,7 +111,6 @@ fn add_entry(
         return Ok(None);
     };
     let is_link = matches!(kind, Kind::Symlink(_));
-    let is_reg = matches!(kind, Kind::Reg(_));
     let mut node = Node::new(kind, if is_link { 0o777 } else { perm }, uid, gid, mtime);
     ctx.squash(&mut node);
     let added = ctx.tree.add_entry(idir, name, node);
@@ -121,32 +118,6 @@ fn add_entry(
         if let Some(key) = key {
             ctx.host_links.insert(key, id);
         }
-        if is_reg && ctx.holes {
-            let zmap = zero_map_of(path, st.len(), ctx.bs)?;
-            if let Kind::Reg(r) = &mut ctx.tree.node_mut(id).kind {
-                r.zmap = Some(Box::new(zmap));
-            }
-        }
     }
     Ok(Some(added))
-}
-
-/// Read a host file and compute its non-zero blocks (for `-z`).
-fn zero_map_of(path: &Path, size: u64, bs: u32) -> Result<crate::runs::Runs> {
-    let mut f = fs::File::open(path).map_err(|e| io_err(path.display(), e))?;
-    let mut z = ZeroMapBuilder::new(bs);
-    let mut buf = vec![0u8; 1 << 20];
-    let mut off = 0u64;
-    loop {
-        let n = f.read(&mut buf).map_err(|e| io_err(path.display(), e))?;
-        if n == 0 {
-            break;
-        }
-        z.feed(off, &buf[..n]);
-        off += n as u64;
-    }
-    if off != size {
-        return Err(Error::fatal(format!("{}: file size changed while reading", path.display())));
-    }
-    Ok(z.finish())
 }
