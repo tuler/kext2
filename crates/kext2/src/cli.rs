@@ -522,9 +522,9 @@ mod tests {
 
     #[test]
     fn long_options() {
-        let o = run(&["--size-in-blocks=300", "--root", "a:/x/./y/", "img"]).unwrap();
+        let o = run(&["--size-in-blocks=300", "--root", "ab:/x/./y/", "img"]).unwrap();
         assert_eq!(o.blocks, Some(300));
-        assert_eq!(o.layers[0].src, OsString::from("a"));
+        assert_eq!(o.layers[0].src, OsString::from("ab"));
         assert_eq!(o.layers[0].path, vec![b"x".to_vec(), b"y".to_vec()]);
         let o = run(&["--size", "300", "img"]).unwrap();
         assert_eq!(o.blocks, Some(300));
@@ -611,7 +611,21 @@ mod tests {
         let l = parse_layer(LayerKind::Tar, b"a:b:c").unwrap();
         assert_eq!(l.src, OsString::from("a"));
         assert_eq!(l.path, vec![b"b:c".to_vec()]);
-        assert!(parse_layer(LayerKind::Dir, b"a:/x/../y").is_err());
+        assert!(parse_layer(LayerKind::Dir, b"ab:/x/../y").is_err());
         assert!(run(&["-x", "a", "-x", "b", "img"]).is_err());
+    }
+
+    #[test]
+    fn drive_prefixes() {
+        // A one-letter source followed by `:\` or `:/` is a Windows drive.
+        let l = parse_layer(LayerKind::Dir, b"C:\\src:/opt").unwrap();
+        let l2 = parse_layer(LayerKind::Dir, b"a:/x").unwrap();
+        if cfg!(windows) {
+            assert_eq!((l.src, l.path), (OsString::from("C:\\src"), vec![b"opt".to_vec()]));
+            assert_eq!((l2.src, l2.path), (OsString::from("a:/x"), vec![]));
+        } else {
+            assert_eq!(l.src, OsString::from("C"));
+            assert_eq!((l2.src, l2.path), (OsString::from("a"), vec![b"x".to_vec()]));
+        }
     }
 }
