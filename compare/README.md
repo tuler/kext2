@@ -52,3 +52,24 @@ python3 compare/bench.py 1024 --out compare/BENCH.md
 Generates a root-filesystem-shaped dataset (default 1 GiB), times every tool
 (best of 3, wall clock, peak RSS), and checks the images for validity and same
 content as xgenext2fs.
+
+## Memory
+
+```bash
+python3 compare/memory.py --out compare/MEMORY.md
+```
+
+Measures peak memory (macOS: peak memory footprint and maximum RSS; Linux:
+maximum RSS) for data sizes, file counts, image sizes and kext2 thread counts.
+See [`MEMORY.md`](MEMORY.md) for the results and their analysis.
+
+## Image size and structure
+
+```bash
+python3 compare/layout.py --out compare/LAYOUT.md
+```
+
+Builds the same inputs with every tool and analyzes the images
+(`analyze_image.py`): where the blocks go, the geometry, the inodes and how
+inodes and data are laid out. See [`LAYOUT.md`](LAYOUT.md).
+

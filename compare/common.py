@@ -51,7 +51,8 @@ def sha256_file(path):
 
 
 def run_tool(tool, args, image, env=None, cwd=None, measure=False):
-    """Run a builder. Returns dict(rc, seconds, rss_bytes, stderr)."""
+    """Run a builder. Returns dict(rc, seconds, rss, footprint, stderr): peak
+    resident set size and, on macOS, peak memory footprint (bytes)."""
     cmd = [TOOLS[tool]] + list(args) + [image]
     if measure and sys.platform == "darwin":
         cmd = ["/usr/bin/time", "-l"] + cmd
@@ -63,11 +64,14 @@ def run_tool(tool, args, image, env=None, cwd=None, measure=False):
     p = subprocess.run(cmd, capture_output=True, env=full_env, cwd=cwd)
     secs = time.perf_counter() - t0
     err = p.stderr.decode(errors="replace")
-    rss = None
+    rss = foot = None
     m = re.search(r"(\d+)\s+maximum resident set size", err)
     if m:
         rss = int(m.group(1))
-    return {"rc": p.returncode, "seconds": secs, "rss": rss, "stderr": err, "cmd": cmd}
+    m = re.search(r"(\d+)\s+peak memory footprint", err)
+    if m:
+        foot = int(m.group(1))
+    return {"rc": p.returncode, "seconds": secs, "rss": rss, "footprint": foot, "stderr": err, "cmd": cmd}
 
 
 def inspect_images(images, hash_data=True):
