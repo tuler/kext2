@@ -40,11 +40,18 @@ pub fn add_dir(ctx: &mut Ctx, src: &Path, target: NodeId) -> Result<()> {
         }
         names.sort_unstable();
         let mut subdirs = Vec::new();
+        let mut hid = None;
         for name in names {
             let path = hdir.join(&name);
             let st = fs::symlink_metadata(&path).map_err(|e| io_err(path.display(), e))?;
             let nb = host::os_bytes(&name);
-            if let Some(Added::New(id) | Added::Merged(id)) = add_entry(ctx, &path, &nb, &st, idir)? {
+            let host = if st.file_type().is_file() {
+                let h = *hid.get_or_insert_with(|| ctx.tree.add_host_dir(hdir.clone()));
+                Some((h, name.into_boxed_os_str()))
+            } else {
+                None
+            };
+            if let Some(Added::New(id) | Added::Merged(id)) = add_entry(ctx, &path, &nb, &st, idir, host)? {
                 if st.is_dir() {
                     subdirs.push((path, id));
                 }
@@ -56,7 +63,15 @@ pub fn add_dir(ctx: &mut Ctx, src: &Path, target: NodeId) -> Result<()> {
     Ok(())
 }
 
-fn add_entry(ctx: &mut Ctx, path: &Path, name: &[u8], st: &fs::Metadata, idir: NodeId) -> Result<Option<Added>> {
+/// `host`: for a regular file, its host directory id and name.
+fn add_entry(
+    ctx: &mut Ctx,
+    path: &Path,
+    name: &[u8],
+    st: &fs::Metadata,
+    idir: NodeId,
+    host: Option<(u32, Box<std::ffi::OsStr>)>,
+) -> Result<Option<Added>> {
     let ft = st.file_type();
     let key = host::file_id(st);
     if ft.is_file() && key.is_some() && key == ctx.output_id {
@@ -76,7 +91,8 @@ fn add_entry(ctx: &mut Ctx, path: &Path, name: &[u8], st: &fs::Metadata, idir: N
         Kind::Dir(Box::default())
     } else if ft.is_file() {
         let size = st.len();
-        Kind::Reg(Box::new(Reg { size, data: Data::Host(path.to_path_buf()), zmap: None }))
+        let (dir, name) = host.expect("regular files carry their host name");
+        Kind::Reg(Box::new(Reg { size, data: Data::Host { dir, name }, zmap: None }))
     } else if ft.is_symlink() {
         let t = fs::read_link(path).map_err(|e| io_err(path.display(), e))?;
         Kind::Symlink(host::os_bytes(t.as_os_str()).into())
@@ -108,7 +124,7 @@ fn add_entry(ctx: &mut Ctx, path: &Path, name: &[u8], st: &fs::Metadata, idir: N
         if is_reg && ctx.holes {
             let zmap = zero_map_of(path, st.len(), ctx.bs)?;
             if let Kind::Reg(r) = &mut ctx.tree.node_mut(id).kind {
-                r.zmap = Some(zmap);
+                r.zmap = Some(Box::new(zmap));
             }
         }
     }

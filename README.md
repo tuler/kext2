@@ -150,10 +150,16 @@ kext2 works in three phases (SPEC §3):
    or sparse. A pipe gets every byte. The bytes never depend on the number
    of threads (`KEXT2_THREADS` sets it; the default is up to 8).
 
-Memory grows with the number of nodes and names. It does not grow with the
-size of the data: file data is streamed, allocations are stored as runs, and
-zero-block maps are run lists. On a 1 GiB root filesystem the peak RSS is
-about 40 MiB.
+Memory has two parts:
+- **Per file:** about 0.3 KiB for the tree and the plan.
+- **Write buffers:** about 40 MiB with 8 threads, 12 MiB with
+  `KEXT2_THREADS=1` (slower, same image).
+
+It does not grow with the size of the data: file data is streamed,
+allocations are stored as runs, and zero-block maps are run lists. On a 1 GiB
+root filesystem the peak footprint is about 45 MiB.
+[`compare/MEMORY.md`](compare/MEMORY.md) has the measurements. To see the
+heap by phase, build with `--features memstats` (development only).
 
 Module map:
 

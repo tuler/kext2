@@ -51,7 +51,7 @@ pub fn render(tree: &Tree, plan: &Plan, id: NodeId, out: &mut impl Write) -> std
         let mut err = Ok(());
         // extents of one node are in increasing logical order
         for e in plan.extents.iter().filter(|e| e.node == id && e.level == 0) {
-            let mut l = e.lstart;
+            let mut l = e.lstart as u64;
             plan.map.for_runs(e.start, e.len as u64, |b, n| {
                 for k in 0..n {
                     if l + k >= nblocks || err.is_err() {

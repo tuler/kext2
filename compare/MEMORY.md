@@ -121,6 +121,91 @@ These are black-box observations: mkext2's source was not read (see
   the image on disk or on tmpfs (346 MiB), so the output speed is not the
   cause. Why Linux and macOS differ is not visible from outside.
 
+## kext2: reducing memory without losing speed
+
+After this report, kext2's memory was profiled by phase. A counting
+allocator, `cargo build --features memstats`, prints the live and peak heap
+after the scan, the plan and the write. For the 1 GiB tree with 8 threads, the
+heap peaks at 44 MiB: 2.5 MiB for the tree, 1.3 MiB for the plan, and 40 MiB
+of write buffers.
+
+### Per-file data (done)
+
+Three changes cut the per-file cost from about 476 to about 309 bytes
+(−35%), with byte-identical images and unchanged speed:
+
+- **Host paths.** A file read from a host directory now keeps only its name;
+  the directory path is stored once. Before, each file stored its full host
+  path.
+- **Block pointers.** The plan no longer stores the 15 `i_block` pointers
+  (60 bytes) for every node. They are computed from the node's extents when
+  its inode is written.
+- **Smaller records.**
+  - Extent records shrink from 32 to 24 bytes: a logical block number fits
+    32 bits in ext2.
+  - The rarely used `-z` zero-map and the symlink target are boxed, which
+    shrinks every regular file's record and every tree node.
+  - The node vector releases its growth slack before the plan.
+
+Peak memory footprint on macOS, in MiB:
+
+| case | 8 threads before | 8 threads after | 1 thread before | 1 thread after |
+|---|---:|---:|---:|---:|
+| 1 GiB tree (9,610 files), 4 KiB blocks | 46.8 | 45.0 | 18.5 | 16.7 |
+| 1 GiB tar, 4 KiB blocks | 45.8 | 44.9 | 17.5 | 16.6 |
+| 10,000 files of 1 KiB | 42.5 | 40.8 | 13.9 | 12.3 |
+| 100,000 files of 1 KiB | 82.3 | 68.5 | 56.7 | 40.1 |
+| empty 16 GiB image | 1.8 | 1.7 | 1.4 | 1.3 |
+
+Checks run on these changes:
+
+- **Bytes:** 36 builds, covering every block size, every indirection level,
+  holes, sparse tar formats, device tables, `-x`, the 1 GiB tree and the
+  100,000 files, gave the same SHA-256 before and after.
+- **Harness:** `compare/run.py` reports 0 kext2 failures, and every
+  reproducibility check is identical.
+- **Speed:** wall time, min / median of 15 shuffled runs:
+
+| case | before | after |
+|---|---:|---:|
+| 1 GiB tree, 4 KiB | 232 / 245 ms | 231 / 252 ms |
+| 1 GiB tree, 1 KiB | 232 / 238 ms | 230 / 239 ms |
+| 1 GiB tar | 196 / 202 ms | 191 / 198 ms |
+| 1 GiB tar.gz | 820 / 865 ms | 822 / 852 ms |
+| 100,000 files | 2,037 / 2,094 ms | 2,022 / 2,088 ms |
+
+The differences are within the run-to-run noise: two copies of the same
+"before" binary differ by as much.
+
+### Write buffers (kept)
+
+Rendering threads fill 4 MiB chunks, and one thread writes them in order;
+up to *threads + 2* chunks are in flight. Profiling the 1 GiB tree shows the
+write phase is bound by that writer:
+- the writer spends about 157 ms in `pwrite`, 9 ms zeroing buffers and only
+  about 20 ms waiting;
+- the 8 renderers together wait about 880 ms.
+
+The extra chunks absorb uneven render times: a region with many small files
+renders slowly, because every file must be opened.
+
+Every way of cutting the buffers cost speed on directory trees, measured
+with shuffled, warmed-up runs:
+
+| option | buffers | 1 GiB tree, 4 KiB |
+|---|---:|---:|
+| current: 4 MiB × 10 | 40 MiB | baseline |
+| 2 MiB × 10 | 20 MiB | +3–4% |
+| 2 MiB × 12, or 1 MiB × 24 | 24 MiB | +2–3% |
+| 4, 5 or 6 threads (window threads + 2) | 24–32 MiB | +3–10% |
+| each renderer writes its own chunk (no window) | 8–32 MiB | +35% (out-of-order writes are slow on APFS) |
+| zeroing moved from the writer to the renderers | 40 MiB | no clear gain |
+
+The buffers stay as they are. When memory matters more than time, set
+`KEXT2_THREADS=1` (or `threads: 1` in Node.js). The buffers then drop to
+12 MiB, about 17 MiB in total for the 1 GiB tree, at about 1.5× the time on
+macOS and up to 3× on Linux. The image is the same.
+
 ## Wall time of the same runs
 
 macOS — Wall time (s):

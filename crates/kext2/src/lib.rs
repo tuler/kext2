@@ -18,6 +18,8 @@ pub mod host;
 pub mod image;
 pub mod input;
 pub mod layout;
+#[cfg(feature = "memstats")]
+pub mod memstats;
 pub mod plan;
 pub mod runs;
 pub mod tree;
@@ -170,6 +172,9 @@ pub fn build_with(o: &Options, sde: Option<OsString>, threads: Option<usize>) ->
         }
     }
     let mut tree = ctx.tree;
+    // the scan is over: release the vectors' growth slack before planning
+    tree.nodes.shrink_to_fit();
+    tree.host_dirs.shrink_to_fit();
 
     let params = plan::Params {
         bs,
@@ -182,8 +187,12 @@ pub fn build_with(o: &Options, sde: Option<OsString>, threads: Option<usize>) ->
         filetype: creator_os != 1,
     };
     let t_scan = t0.elapsed();
+    #[cfg(feature = "memstats")]
+    memstats::report("scan");
     let plan = plan::plan(&mut tree, &params)?;
     let t_plan = t0.elapsed();
+    #[cfg(feature = "memstats")]
+    memstats::report("plan");
     for p in &o.block_maps {
         if blockmap::resolve(&tree, &plan, p).is_none() {
             return Err(Error::fatal(format!("path {} not found in filesystem", error::show(p))));
@@ -210,6 +219,8 @@ pub fn build_with(o: &Options, sde: Option<OsString>, threads: Option<usize>) ->
         Some(t) => write::write_image_threads(&r, &o.image, t)?,
         None => write::write_image(&r, &o.image)?,
     }
+    #[cfg(feature = "memstats")]
+    memstats::report("write");
     blockmap::write_all(&tree, &plan, &o.block_maps)?;
     if o.verbose {
         let t_write = t0.elapsed();

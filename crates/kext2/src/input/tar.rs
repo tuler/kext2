@@ -893,7 +893,7 @@ fn process_member(
     if let Kind::Reg(r) = &mut ctx.tree.node_mut(id).kind {
         r.size = real;
         r.data = if regs.is_empty() { Data::Zero } else { Data::Source { src, regions: regs.into() } };
-        r.zmap = z.map(|z| z.finish());
+        r.zmap = z.map(|z| Box::new(z.finish()));
     }
     Ok(())
 }

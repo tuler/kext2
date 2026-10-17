@@ -36,12 +36,41 @@ pub struct Params {
 #[derive(Debug, Clone, Copy)]
 pub struct Extent {
     pub start: u64,
-    /// First logical block (leaf) or the first logical block mapped (indirect).
-    pub lstart: u64,
+    /// First logical block (leaf) or the first logical block mapped
+    /// (indirect). An ext2 file has fewer than 2^32 logical blocks.
+    pub lstart: u32,
     pub node: NodeId,
     pub len: u32,
     /// 0 = data/directory/symlink block(s), 1..3 = indirect level.
     pub level: u8,
+}
+
+impl Plan {
+    /// `i_block` of node `id` (R-FMT-13): the first 12 data blocks, then the
+    /// single, double and triple indirect blocks.
+    pub fn iblock(&self, id: NodeId) -> [u32; 15] {
+        let mut ib = [0u32; 15];
+        let first = self.first_extent[id as usize];
+        if first == NONE {
+            return ib;
+        }
+        let t = self.tiers;
+        for e in self.extents[first as usize..].iter().take_while(|e| e.node == id) {
+            match e.level {
+                0 => {
+                    let ls = e.lstart as u64;
+                    for l in ls..(ls + e.len as u64).min(12) {
+                        ib[l as usize] = self.map.block(e.start + (l - ls)) as u32;
+                    }
+                }
+                1 if e.lstart as u64 == t.single => ib[12] = self.map.block(e.start) as u32,
+                2 if e.lstart as u64 == t.double => ib[13] = self.map.block(e.start) as u32,
+                3 => ib[14] = self.map.block(e.start) as u32,
+                _ => {}
+            }
+        }
+        ib
+    }
 }
 
 /// Directory packing.
@@ -69,8 +98,10 @@ pub struct Plan {
     pub nlink: Vec<u32>,
     /// Per node: blocks (data + indirect).
     pub nb: Vec<u64>,
-    /// Per node: `i_block` for nodes with blocks.
-    pub iblock: Vec<[u32; 15]>,
+    /// Per node: index of its first extent (`NONE` without blocks); a
+    /// node's extents are consecutive. `i_block` is derived from them
+    /// ([`Plan::iblock`]).
+    pub first_extent: Vec<u32>,
     /// Per node: directory packing.
     pub dirs: Vec<Option<Box<DirPlan>>>,
     /// The generated lost+found, if it is in the image.
@@ -393,7 +424,7 @@ pub fn plan(tree: &mut Tree, p: &Params) -> Result<Plan> {
         next: vec![0u32; geo.groups as usize],
         used_dirs: vec![0u32; geo.groups as usize],
         ino: vec![0u32; n],
-        iblock: vec![[0u32; 15]; n],
+        first_extent: vec![NONE; n],
         nb: &nb,
         dirs: &dirs,
         extents: Vec::new(),
@@ -411,7 +442,7 @@ pub fn plan(tree: &mut Tree, p: &Params) -> Result<Plan> {
     a.process(ROOT, true, lost_found);
     debug_assert_eq!(a.rem, 0);
 
-    let Alloc { next, used_dirs, ino, iblock, extents, alloc, .. } = a;
+    let Alloc { next, used_dirs, ino, first_extent, extents, alloc, .. } = a;
     // per-group free blocks
     let mut free_blocks = Vec::with_capacity(geo.groups as usize);
     let mut ai = 0usize;
@@ -459,7 +490,7 @@ pub fn plan(tree: &mut Tree, p: &Params) -> Result<Plan> {
         ino,
         nlink,
         nb,
-        iblock,
+        first_extent,
         dirs,
         lost_found,
         extents,
@@ -485,7 +516,7 @@ struct Alloc<'a> {
     next: Vec<u32>,
     used_dirs: Vec<u32>,
     ino: Vec<u32>,
-    iblock: Vec<[u32; 15]>,
+    first_extent: Vec<u32>,
     nb: &'a [u64],
     dirs: &'a [Option<Box<DirPlan>>],
     extents: Vec<Extent>,
@@ -523,10 +554,6 @@ impl Alloc<'_> {
         self.assign_blocks(x);
     }
 
-    fn push_extent(&mut self, e: Extent) {
-        self.extents.push(e);
-    }
-
     fn assign_blocks(&mut self, x: NodeId) {
         let nb = self.nb[x as usize];
         if nb == 0 {
@@ -535,41 +562,27 @@ impl Alloc<'_> {
         let base = self.c;
         let node = self.tree.node(x);
         let set = match &node.kind {
-            Kind::Reg(r) => file_set(r.size, self.bs, r.zmap.as_ref()),
+            Kind::Reg(r) => file_set(r.size, self.bs, r.zmap.as_deref()),
             Kind::Dir(_) => Runs::dense(self.dirs[x as usize].as_ref().unwrap().nblocks),
             _ => Runs::dense(1), // slow symlink
         };
         let mut pos = base;
-        let mut ib = [0u32; 15];
         let t = self.tiers;
-        let map = self.map;
-        let mut ext = Vec::new();
+        self.first_extent[x as usize] = self.extents.len() as u32;
+        let mut ext = std::mem::take(&mut self.extents);
         layout::walk(&set, &t, |s| match s {
             Seg::Data { lstart, n } => {
-                for l in lstart..(lstart + n).min(12) {
-                    ib[l as usize] = map.block(pos + (l - lstart)) as u32;
-                }
-                ext.push(Extent { start: pos, lstart, node: x, len: n as u32, level: 0 });
+                debug_assert!(lstart + n <= u32::MAX as u64);
+                ext.push(Extent { start: pos, lstart: lstart as u32, node: x, len: n as u32, level: 0 });
                 pos += n;
             }
             Seg::Ind { level, lstart } => {
-                let b = map.block(pos) as u32;
-                if level == 1 && lstart == t.single {
-                    ib[12] = b;
-                } else if level == 2 && lstart == t.double {
-                    ib[13] = b;
-                } else if level == 3 {
-                    ib[14] = b;
-                }
-                ext.push(Extent { start: pos, lstart, node: x, len: 1, level });
+                ext.push(Extent { start: pos, lstart: lstart as u32, node: x, len: 1, level });
                 pos += 1;
             }
         });
+        self.extents = ext;
         debug_assert_eq!(pos - base, nb);
-        for e in ext {
-            self.push_extent(e);
-        }
-        self.iblock[x as usize] = ib;
         match self.alloc.last_mut() {
             Some(last) if last.0 + last.1 == base => last.1 += nb,
             _ => self.alloc.push((base, nb)),
